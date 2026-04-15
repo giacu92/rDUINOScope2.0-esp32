@@ -1,5 +1,7 @@
 #include <math.h>
 #include <stdio.h>
+#include <time.h>
+#include <Arduino.h>
 
 enum class State : uint16_t {
     IDLE = 0,
@@ -11,8 +13,6 @@ enum class State : uint16_t {
 class Telescope {
 public:
     const char *fw_ver = "004 24 2026#";
-    struct tm fw_time;
-    struct tm date;
 
     State status = State::IDLE;
     double latitude;    // gradi decimali, Nord positivo
@@ -25,7 +25,13 @@ public:
     bool isSlewing = false;
 
     Telescope(double lat = 0.0, double lon = 0.0)
-        : latitude(lat), longitude(lon), ra(6.5), dec(22.0) {}
+        : latitude(lat), longitude(lon), ra(6.5), dec(22.0) {
+        struct tm initialTime = {};
+        initialTime.tm_year = 2026 - 1900;
+        initialTime.tm_mon = 0;
+        initialTime.tm_mday = 1;
+        setLX200DateTime(initialTime);
+    }
 
     // --- Normalizzazioni fondamentali ---
     void normalize() {
@@ -43,40 +49,48 @@ public:
 
     // :GL# -> "Get Local time"
     void getLX200Localtime(char *out) {
+        struct tm t;
+        getLX200DateTime(t);
         sprintf(out, "%02d:%02d:%02d#",
-                date.tm_hour,
-                date.tm_min,
-                date.tm_sec);
-    }
-
-    void setLX200TimezoneOffsetHours(float _hrs)
-    {
-        struct tm t = date;
-        t.tm_hour += _hrs;
-        date = t;
+                t.tm_hour,
+                t.tm_min,
+                t.tm_sec);
     }
 
     void getLX200FwTime(char *out) {
-        sprintf(out, "%02d:%02d:%02d#",
-                fw_time.tm_hour,
-                fw_time.tm_min,
-                fw_time.tm_sec);
-    }
-
-    void setLX200FwTime(const struct tm &t) {
-        fw_time = t;
+        getLX200Localtime(out);
     }
 
     bool setLX200Date(const struct tm &t) {
-        date = t;
+        return setLX200DateTime(t);
+    }
+
+    bool getLX200DateTime(struct tm &out) {
+        time_t now = currentLX200Time();
+        struct tm *local = localtime(&now);
+        if (!local) return false;
+
+        out = *local;
+        return true;
+    }
+
+    bool setLX200DateTime(const struct tm &t) {
+        struct tm normalized = t;
+        time_t epoch = mktime(&normalized);
+        if (epoch == (time_t)-1) return false;
+
+        lx200Time = epoch;
+        lx200TimeMillis = millis();
         return true;
     }
 
     void getLX200Date(char *out) {
+        struct tm t;
+        getLX200DateTime(t);
         sprintf(out, "%02d/%02d/%02d#",
-                date.tm_mon + 1,
-                date.tm_mday,
-                date.tm_year % 100);
+                t.tm_mon + 1,
+                t.tm_mday,
+                t.tm_year % 100);
     }
 
     // :Gt#  -> sDD*MM#
@@ -162,6 +176,13 @@ public:
     }
 
 private:
+    time_t lx200Time = 0;
+    unsigned long lx200TimeMillis = 0;
+
+    time_t currentLX200Time() const {
+        return lx200Time + (time_t)((millis() - lx200TimeMillis) / 1000UL);
+    }
+
     double julianDay(int Y, int M, int D, int h, int m, int s) {
         if (M <= 2) { Y--; M += 12; }
 

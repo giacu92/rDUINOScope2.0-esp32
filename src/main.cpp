@@ -49,7 +49,7 @@ double currentDEC_deg = 0.0;
 double targetRA_h     = 0.0;
 double targetDEC_deg  = 0.0;
 bool   targetSet      = false;   // true dopo aver ricevuto sia :Sr che :Sd
-bool   lx200TimeManual = false;  // true dopo :SL o :SC, per non sovrascrivere il tempo LX200 con il clock di sistema
+bool   lx200TimeManual = false;  // true dopo :SL o :SC, per non sovrascrivere il tempo LX200 con NTP
 
 // FIX [5]: timezone offset in ore (impostato da :St, default da config)
 float  timezoneOffsetHours = (float)(GMT_OFFSET_SEC + DAYLIGHT_OFFSET_SEC) / 3600.0f;
@@ -198,7 +198,7 @@ void syncNTP() {
     while (!getLocalTime(&t) && attempts < 20) { delay(100); Serial.print("."); attempts++; }
     if (attempts < 20) {
         Serial.printf("\nOra: %02d:%02d:%02d\n", t.tm_hour, t.tm_min, t.tm_sec);
-        telescope.setLX200FwTime(t);
+        telescope.setLX200Date(t);
     }
     else
         Serial.println("\nWARNING: NTP fallito!");
@@ -418,12 +418,13 @@ void processLX200Command(const String &cmd) {
         String dateStr = cmd.substring(3, cmd.length() - 1); // Remove :SC and #
         int month, day, year;
         if (sscanf(dateStr.c_str(), "%d/%d/%d", &month, &day, &year) == 3) {
-            struct tm timeinfo = telescope.date;
-            timeinfo.tm_year = year+2000;
-            timeinfo.tm_mon = month;
+            struct tm timeinfo;
+            telescope.getLX200DateTime(timeinfo);
+            timeinfo.tm_year = (year < 100 ? year + 2000 : year) - 1900;
+            timeinfo.tm_mon = month - 1;
             timeinfo.tm_mday = day;
-            if (DEBUG_LX200) Serial.printf("[LX200] \":SC\" Date set to: %d/%d/%d\n", timeinfo.tm_year, timeinfo.tm_mon, timeinfo.tm_mday);
-            if (telescope.setLX200Date(timeinfo)) {
+            if (DEBUG_LX200) Serial.printf("[LX200] \":SC\" Date set to: %02d/%02d/%04d\n", month, day, timeinfo.tm_year + 1900);
+            if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && telescope.setLX200Date(timeinfo)) {
                 lx200TimeManual = true;
                 sendResponse("1Updating Planetary Data# #");
             } else {
@@ -533,7 +534,7 @@ void processLX200Command(const String &cmd) {
         int h = 0, h2 = 0;
         sscanf(cmd.c_str() + 4, "%02d.%d#", &h, &h2);
         offset = sign * (h + h2 / 10.0);
-        timezoneOffsetHours = sign*offset;
+        timezoneOffsetHours = offset;
         if (DEBUG_LX200)    Serial.printf("[LX200] Timezone offset: %.1f h\n", timezoneOffsetHours);
         sendResponse("1");
     }
@@ -543,7 +544,8 @@ void processLX200Command(const String &cmd) {
         int h = 0, m = 0, s = 0;
         if (sscanf(cmd.c_str() + 3, "%d:%d:%d#", &h, &m, &s) == 3) {
             // Prendi la data attuale dal telescope, modifica solo l'ora
-            struct tm timeinfo = telescope.date;
+            struct tm timeinfo;
+            telescope.getLX200DateTime(timeinfo);
             timeinfo.tm_hour = h;
             timeinfo.tm_min = m;
             timeinfo.tm_sec = s;
