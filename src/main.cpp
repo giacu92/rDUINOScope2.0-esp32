@@ -48,6 +48,8 @@ double currentDEC_deg = 0.0;
 // FIX [2]: target separato dalla posizione corrente
 double targetRA_h     = 0.0;
 double targetDEC_deg  = 0.0;
+bool   targetRASet    = false;
+bool   targetDECSet   = false;
 bool   targetSet      = false;   // true dopo aver ricevuto sia :Sr che :Sd
 bool   lx200TimeManual = false;  // true dopo :SL o :SC, per non sovrascrivere il tempo LX200 con NTP
 
@@ -256,6 +258,9 @@ void handleStellarium() {
             stelClient.setNoDelay(true);
             stelProto     = PROTO_UNKNOWN;
             lx200Ready    = false;
+            targetRASet   = false;
+            targetDECSet  = false;
+            targetSet     = false;
             tcpIdx        = 0;
             binIdx        = 0;
             memset(tcpBuf, 0, sizeof(tcpBuf));
@@ -440,21 +445,42 @@ void processLX200Command(const String &cmd) {
         int d = 0, m = 0, s = 0;
         // Accetta sia sDD*MM'SS# che sDD*MM#
         int parsed = sscanf(cmd.c_str() + 4, "%d*%d'%d#", &d, &m, &s);
-        if (parsed >= 2) {
+        if (parsed < 2) parsed = sscanf(cmd.c_str() + 4, "%d*%d:%d#", &d, &m, &s);
+        if (parsed < 2) parsed = sscanf(cmd.c_str() + 4, "%d*%d#", &d, &m);
+        bool decParsed = parsed >= 2;
+        if (decParsed) {
             targetDEC_deg = sign * (d + m / 60.0 + s / 3600.0);
-            targetSet = true;
+            targetDECSet = true;
+            targetSet = targetRASet && targetDECSet;
+            sendResponse("1");
             if (DEBUG_LX200) Serial.printf("[LX200] Target DEC: %.4f°\n", targetDEC_deg);
         }
-        sendResponse("1");
+        if (!decParsed) sendResponse("0");
     }
     // --- SET TARGET RA :SrHH:MM:SS#  FIX [2] ---
     else if (cmd.startsWith(":Sr")) {
         int h = 0, m = 0, s = 0;
-        if (sscanf(cmd.c_str() + 3, "%d:%d:%d#", &h, &m, &s) == 3) {
+        float mf = 0.0f;
+        int parsed = sscanf(cmd.c_str() + 3, "%d:%d:%d#", &h, &m, &s);
+        if (parsed == 3) {
             targetRA_h = h + m / 60.0 + s / 3600.0;
-            if (DEBUG_LX200) Serial.printf("[LX200] Target RA: %.4f h\n", targetRA_h);
+        } else if (sscanf(cmd.c_str() + 3, "%d:%f#", &h, &mf) == 2) {
+            targetRA_h = h + mf / 60.0;
+            parsed = 2;
         }
-        sendResponse("1");
+
+        if (parsed >= 2) {
+            targetRASet = true;
+            targetSet = targetRASet && targetDECSet;
+            if (DEBUG_LX200) Serial.printf("[LX200] Target RA: %.4f h\n", targetRA_h);
+            sendResponse("1");
+        } else {
+            if (DEBUG_LX200) {
+                Serial.print("[WARN] :Sr non valido: ");
+                Serial.println(cmd);
+            }
+            sendResponse("0");
+        }
     }
     // --- GOTO :MS#  FIX [2] ---
     else if (cmd.startsWith(":MS#")) {
@@ -463,7 +489,9 @@ void processLX200Command(const String &cmd) {
             sendResponse("0");
         } else {
             // LX200: "1" = oggetto sotto orizzonte / non pronto
-            Serial.println("[WARN] :MS# ricevuto senza target valido");
+            Serial.printf("[WARN] :MS# ricevuto senza target valido (RA=%d DEC=%d)\n",
+                          targetRASet ? 1 : 0,
+                          targetDECSet ? 1 : 0);
             sendResponse("1No target set#");
         }
     }
@@ -509,12 +537,24 @@ void processLX200Command(const String &cmd) {
 
     // --- SET LONGITUDE :SgsDDD*MM#  FIX [5]: parse separato ---
     else if (cmd.startsWith(":Sg")) {
-        int sign = (cmd.charAt(3) == '-') ? -1 : 1;
+        const char *lonText = cmd.c_str() + 3;
+        int sign = 1;
+        if (*lonText == '+' || *lonText == '-') {
+            sign = (*lonText == '-') ? -1 : 1;
+            lonText++;
+        }
+
         int d = 0, m = 0;
-        sscanf(cmd.c_str() + 4, "%d*%d#", &d, &m);
-        double val = sign * (d + m / 60.0);
-        telescope.setLX200Longitude(val);
-        sendResponse("1");
+        if (sscanf(lonText, "%d*%d#", &d, &m) == 2) {
+            double meadeWestLon = sign * (d + m / 60.0);
+            double eastLon = -meadeWestLon; // LX200/Meade usa Ovest positivo; interno usa Est positivo.
+            while (eastLon < -180.0) eastLon += 360.0;
+            while (eastLon > 180.0) eastLon -= 360.0;
+            telescope.setLX200Longitude(eastLon);
+            sendResponse("1");
+        } else {
+            sendResponse("0");
+        }
     }
 
     // --- SET LATITUDE :StsDDD*MM#  (riusa lo stesso parser) ---
@@ -623,6 +663,8 @@ void parseStelBinaryPacket(uint8_t* buf, int len) {
 
     targetRA_h    = ((double)ra_raw  / 0xFFFFFFFFUL) * 24.0;
     targetDEC_deg = ((double)dec_raw / 0x3FFFFFFFL)  * 90.0;
+    targetRASet   = true;
+    targetDECSet  = true;
     targetSet     = true;
 
     if (DEBUG_LX200) { Serial.printf("[BIN] GOTO → RA=%.4f h  DEC=%.4f°\n", targetRA_h, targetDEC_deg); }
