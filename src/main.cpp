@@ -91,6 +91,8 @@ void    preTransmission();
 void    postTransmission();
 void    modbusTask(void* pvParams);
 void    readPositionFromModbus();
+double  raDeltaHours(double a, double b);
+bool    currentPositionMatchesTarget(long targetRaArcsec100, long targetDecArcsec100);
 
 // =============================================================================
 //  SETUP
@@ -123,6 +125,24 @@ void setup() {
     tcpServer.begin();
     tcpServer.setNoDelay(true);
     Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
+}
+
+// Differenza minima tra due RA, considerando il wrap 0..24h.
+double raDeltaHours(double a, double b) {
+    double delta = fabs(a - b);
+    if (delta > 12.0) delta = 24.0 - delta;
+    return delta;
+}
+
+bool currentPositionMatchesTarget(long targetRaArcsec100, long targetDecArcsec100) {
+    const double RA_TOL_H    = 0.001111;  // circa 1 arcmin in RA
+    const double DEC_TOL_DEG = 0.016667;  // circa 1 arcmin
+
+    double targetRaH  = ((targetRaArcsec100 / 100.0) / 3600.0) / 15.0;
+    double targetDecD =  (targetDecArcsec100 / 100.0) / 3600.0;
+
+    return raDeltaHours(currentRA_h, targetRaH) <= RA_TOL_H
+        && fabs(currentDEC_deg - targetDecD) <= DEC_TOL_DEG;
 }
 
 // =============================================================================
@@ -638,11 +658,20 @@ void modbusTask(void* pvParams) {
             uint16_t dec_high = (uint16_t)((cmd.dec_steps >> 16) & 0xFFFF);
             uint16_t dec_low  = (uint16_t)( cmd.dec_steps        & 0xFFFF);
 
+            uint8_t resetResult = modbus.writeSingleRegister(REG_COMMAND, 0x0000);
+            if (resetResult != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
+                if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore reset COMMAND prima del GOTO: 0x%02X\n", resetResult); }
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+
             modbus.setTransmitBuffer(0, ra_high);
             modbus.setTransmitBuffer(1, ra_low);
             modbus.setTransmitBuffer(2, dec_high);
             modbus.setTransmitBuffer(3, dec_low);
             modbus.setTransmitBuffer(4, 0x0001);  // CMD_GOTO
+            
+            if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] sending: RA_high=0x%04X RA_low=0x%04X DEC_high=0x%04X DEC_low=0x%04X COMMAND=%d\n",
+                          ra_high, ra_low, dec_high, dec_low, 1); }
 
             uint8_t result = modbus.writeMultipleRegisters(REG_RA_HIGH, 5);
             if (result != modbus.ku8MBSuccess) {
@@ -653,8 +682,11 @@ void modbusTask(void* pvParams) {
 
             // Polling status STM32 fino a TRACKING (done) o ERROR o timeout
             // Ogni iterazione legge davvero i registri Modbus e aggiorna telescope
-            const int MAX_POLL = 300;   // max ~30 secondi (100 ms * 300)
+            const int MAX_POLL = 3000;   // max ~30 secondi (100 ms * 300)
             bool gotoFinished = false;
+            bool sawSlewing = false;
+            bool commandCleared = false;
+            bool warnedTrackingWithoutSlewing = false;
             for (int i = 0; i < MAX_POLL; i++) {
                 esp_task_wdt_reset();
                 vTaskDelay(pdMS_TO_TICKS(100));
@@ -662,12 +694,31 @@ void modbusTask(void* pvParams) {
                 readPositionFromModbus();   // aggiorna telescope.status, ra, dec
 
                 if (telescope.status == State::SLEWING) {
-                    // ancora in movimento, continua
+                    sawSlewing = true;
+
+                    // Dopo che STM32 ha preso in carico il comando, rimetti REG_COMMAND
+                    // a zero: il prossimo GOTO sara' una nuova transizione 0 -> 1.
+                    if (!commandCleared) {
+                        uint8_t clearResult = modbus.writeSingleRegister(REG_COMMAND, 0x0000);
+                        if (clearResult == modbus.ku8MBSuccess) {
+                            commandCleared = true;
+                            if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] Setting COMMAND = 0."); }
+                        } else if (DEBUG_LX200_MODBUS) {
+                            Serial.printf("[Modbus] Error: unable to clear COMMAND. COMMAND = 0x%02X\n", clearResult);
+                        }
+                    }
                 } else if (telescope.status == State::TRACKING) {
-                    if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
-                    telescope.setSlewing(false);
-                    gotoFinished = true;
-                    break;
+                    if (sawSlewing || currentPositionMatchesTarget(cmd.ra_steps, cmd.dec_steps)) {
+                        if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
+                        telescope.setSlewing(false);
+                        gotoFinished = true;
+                        break;
+                    }
+
+                    if (i > 5 && !warnedTrackingWithoutSlewing && DEBUG_LX200_MODBUS) {
+                        Serial.println("[Modbus] TRACKING letto senza SLEWING: attendo avvio reale GOTO.");
+                        warnedTrackingWithoutSlewing = true;
+                    }
                 } else if (telescope.status == State::ERROR) {
                     if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 ha riportato errore GOTO."); }
                     telescope.setSlewing(false);
@@ -686,13 +737,14 @@ void modbusTask(void* pvParams) {
 
             if (!gotoFinished) {
                 if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] Timeout polling STM32."); }
+                modbus.writeSingleRegister(REG_COMMAND, 0x0000);
                 telescope.setSlewing(false);
             }
             lastPosRead = millis();   // evita doppia lettura immediata a fine GOTO
         }
 
-        // Lettura periodica della posizione corrente (~3 volte/secondo)
-        if (millis() - lastPosRead >= 333) {
+        // Lettura periodica della posizione corrente (~4 volte/secondo)
+        if (millis() - lastPosRead >= 250) {
             lastPosRead = millis();
             readPositionFromModbus();
         }

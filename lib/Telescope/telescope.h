@@ -25,7 +25,7 @@ public:
     bool isSlewing = false;
 
     Telescope(double lat = 0.0, double lon = 0.0)
-        : latitude(lat), longitude(lon), ra(0.0), dec(0.0) {}
+        : latitude(lat), longitude(lon), ra(6.5), dec(22.0) {}
 
     // --- Normalizzazioni fondamentali ---
     void normalize() {
