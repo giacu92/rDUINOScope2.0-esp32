@@ -41,7 +41,7 @@ ModbusMaster modbus;
 
 Telescope telescope(LATITUDE_DEG, LONGITUDE_DEG);
 
-// Posizione CORRENTE del telescopio (aggiornata solo quando STM32 conferma "done")
+// Posizione CORRENTE del telescopio (letta periodicamente da STM32 via Modbus)
 double currentRA_h    = 0.0;
 double currentDEC_deg = 0.0;
 
@@ -49,6 +49,7 @@ double currentDEC_deg = 0.0;
 double targetRA_h     = 0.0;
 double targetDEC_deg  = 0.0;
 bool   targetSet      = false;   // true dopo aver ricevuto sia :Sr che :Sd
+bool   lx200TimeManual = false;  // true dopo :SL o :SC, per non sovrascrivere il tempo LX200 con il clock di sistema
 
 // FIX [5]: timezone offset in ore (impostato da :St, default da config)
 float  timezoneOffsetHours = (float)(GMT_OFFSET_SEC + DAYLIGHT_OFFSET_SEC) / 3600.0f;
@@ -86,11 +87,10 @@ void    sendResponse(const String &res);
 void    executeGoto();
 void    parseStelBinaryPacket(uint8_t* buf, int len);
 void    sendCurrentPosition(WiFiClient& client);
-long    haToDegSteps(double ha_h);
-long    decDegToSteps(double dec_deg);
 void    preTransmission();
 void    postTransmission();
 void    modbusTask(void* pvParams);
+void    readPositionFromModbus();
 
 // =============================================================================
 //  SETUP
@@ -146,7 +146,7 @@ void loop() {
 
     // FIX [1]: static → sopravvive tra le iterazioni del loop
     static unsigned long lastClockUpdate = 0;
-    if (millis() - lastClockUpdate >= 1000) {
+    if (!lx200TimeManual && millis() - lastClockUpdate >= 1000) {
         lastClockUpdate = millis();
         struct tm timeinfo;
         if (getLocalTime(&timeinfo)) {
@@ -176,8 +176,10 @@ void syncNTP() {
     struct tm t;
     int attempts = 0;
     while (!getLocalTime(&t) && attempts < 20) { delay(100); Serial.print("."); attempts++; }
-    if (attempts < 20)
+    if (attempts < 20) {
         Serial.printf("\nOra: %02d:%02d:%02d\n", t.tm_hour, t.tm_min, t.tm_sec);
+        telescope.setLX200FwTime(t);
+    }
     else
         Serial.println("\nWARNING: NTP fallito!");
 }
@@ -331,27 +333,14 @@ void processLX200Command(const String &cmd) {
     // Comando vuoto (solo '#'): Stellarium lo manda come flush/ping, ignora silenziosamente
     if (cmd == "#" || cmd.length() == 0) return;
 
-    // --- GET LONGITUDE / TRACKING STATUS ---
-    if (cmd.startsWith(":Gg#") || cmd.startsWith(":GW#")) {
-        telescope.getLX200Longitude(reply);
+    // --- SYNC :CM# ---
+    else if (cmd.startsWith(":CM#")) {
+        telescope.getLX200Sync(reply);
         sendResponse(reply);
     }
-    // --- GET LATITUDE ---
-    else if (cmd.startsWith(":Gt#")) {
-        telescope.getLX200Latitude(reply);
-        sendResponse(reply);
-    }
-    // --- GET LOCAL TIME ---
-    else if (cmd.startsWith(":GL#")) {
-        telescope.getLX200Localtime(reply);
-        sendResponse(reply);
-    }
-    // --- GET RA ---
-    else if (cmd.startsWith(":GR#")) {
-        lx200Ready = true;   // FIX [13]: handshake superato, ora possiamo inviare posizione
-        telescope.normalize();
-        telescope.getLX200RA(reply);
-        sendResponse(reply);
+    // --- GET ALTITUDE :GA# ---
+    else if (cmd.startsWith(":GA#")) {
+        sendResponse("+00*00#");   // placeholder
     }
     // --- GET DEC ---
     else if (cmd.startsWith(":GD#")) {
@@ -360,34 +349,70 @@ void processLX200Command(const String &cmd) {
         telescope.getLX200Dec(reply);
         sendResponse(reply);
     }
-    // --- GET AZIMUTH :GZ# (richiesto da alcuni client durante handshake) FIX [12] ---
-    else if (cmd.startsWith(":GZ#")) {
-        sendResponse("000*00#");   // placeholder
+    // --- GET LOCAL TIME ---
+    else if (cmd.startsWith(":GL#")) {
+        telescope.getLX200Localtime(reply);
+        if (DEBUG_LX200) Serial.printf("[LX200] :GL# --> Reporting local time: %s\n", reply);
+        sendResponse(reply);
     }
-    // --- GET ALTITUDE :GA# ---
-    else if (cmd.startsWith(":GA#")) {
-        sendResponse("+00*00#");   // placeholder
+    // --- GET LONGITUDE / TRACKING STATUS ---
+    // --- GET ALIGNMENT STATUS :GW# già gestito sopra con :Gg# ---
+    else if (cmd.startsWith(":Gg#") || cmd.startsWith(":GW#")) {
+        telescope.getLX200Longitude(reply);
+        sendResponse(reply);
+    }
+    // --- GET UTC OFFSET TIME :GG# ---  sHH#
+    else if (cmd.startsWith(":GG#")) {
+        char sign = (timezoneOffsetHours >= 0) ? '+' : '-';
+        snprintf(reply, sizeof(reply), "%c%02d#", sign, (int)fabs(timezoneOffsetHours));
+        if (DEBUG_LX200) Serial.printf("[LX200] :GG# --> Reporting timezone offset: %s\n", reply);
+        sendResponse(reply);
+    }
+    // --- GET LATITUDE ---
+    else if (cmd.startsWith(":Gt#")) {
+        telescope.getLX200Latitude(reply);
+        sendResponse(reply);
     }
     // --- GET TRACKING RATE :GT# ---
     else if (cmd.startsWith(":GT#")) {
         sendResponse("60.0#");     // siderale
     }
-    // --- GET ALIGNMENT STATUS :GW# già gestito sopra con :Gg# ---
+    // --- GET RA ---
+    else if (cmd.startsWith(":GR#")) {
+        lx200Ready = true;   // FIX [13]: handshake superato, ora possiamo inviare posizione
+        telescope.normalize();
+        telescope.getLX200RA(reply);
+        sendResponse(reply);
+    }
+    // --- GET AZIMUTH :GZ# (richiesto da alcuni client durante handshake) FIX [12] ---
+    else if (cmd.startsWith(":GZ#")) {
+        sendResponse("000*00#");   // placeholder
+    }
     // --- GET ALIGNMENT MENU :pS# ---
     else if (cmd.startsWith(":pS#")) {
         sendResponse("East#");
     }
-
-    // --- SET TARGET RA :SrHH:MM:SS#  FIX [2] ---
-    else if (cmd.startsWith(":Sr")) {
-        int h = 0, m = 0, s = 0;
-        if (sscanf(cmd.c_str() + 3, "%d:%d:%d#", &h, &m, &s) == 3) {
-            targetRA_h = h + m / 60.0 + s / 3600.0;
-            if (DEBUG_LX200) Serial.printf("[LX200] Target RA: %.4f h\n", targetRA_h);
+    // --- SET DATE : Example: ":SC04/15/26#"
+    else if (cmd.startsWith(":SC")) {
+        // Parse the date string into struct tm
+        String dateStr = cmd.substring(3, cmd.length() - 1); // Remove :SC and #
+        int month, day, year;
+        if (sscanf(dateStr.c_str(), "%d/%d/%d", &month, &day, &year) == 3) {
+            struct tm timeinfo = telescope.date;
+            timeinfo.tm_year = year+2000;
+            timeinfo.tm_mon = month;
+            timeinfo.tm_mday = day;
+            if (DEBUG_LX200) Serial.printf("[LX200] \":SC\" Date set to: %d/%d/%d\n", timeinfo.tm_year, timeinfo.tm_mon, timeinfo.tm_mday);
+            if (telescope.setLX200Date(timeinfo)) {
+                lx200TimeManual = true;
+                sendResponse("1Updating Planetary Data# #");
+            } else {
+                sendResponse("0");
+            }
+        } else {
+            sendResponse("0");
         }
-        sendResponse("1");
     }
-
     // --- SET TARGET DEC :SdsDD*MM'SS#  FIX [2] ---
     else if (cmd.startsWith(":Sd")) {
         int sign = (cmd.charAt(3) == '-') ? -1 : 1;
@@ -401,7 +426,15 @@ void processLX200Command(const String &cmd) {
         }
         sendResponse("1");
     }
-
+    // --- SET TARGET RA :SrHH:MM:SS#  FIX [2] ---
+    else if (cmd.startsWith(":Sr")) {
+        int h = 0, m = 0, s = 0;
+        if (sscanf(cmd.c_str() + 3, "%d:%d:%d#", &h, &m, &s) == 3) {
+            targetRA_h = h + m / 60.0 + s / 3600.0;
+            if (DEBUG_LX200) Serial.printf("[LX200] Target RA: %.4f h\n", targetRA_h);
+        }
+        sendResponse("1");
+    }
     // --- GOTO :MS#  FIX [2] ---
     else if (cmd.startsWith(":MS#")) {
         if (targetSet) {
@@ -443,12 +476,6 @@ void processLX200Command(const String &cmd) {
         sendResponse(telescope.isSlewing ? "|#" : "#");
     }
 
-    // --- SYNC :CM# ---
-    else if (cmd.startsWith(":CM#")) {
-        telescope.getLX200Sync(reply);
-        sendResponse(reply);
-    }
-
     // --- ABORT :Q# ---
     else if (cmd.startsWith(":Q#") || cmd.startsWith("Q#")) {
         telescope.setSlewing(false);
@@ -482,18 +509,34 @@ void processLX200Command(const String &cmd) {
     // --- SET UTC OFFSET :SG sHH.H#  FIX [5]: salva offset, non modifica tm_hour ---
     else if (cmd.startsWith(":SG")) {
         float offset = 0.0f;
-        // LX200: segno opposto (Ovest positivo), quindi invertiamo
-        if (sscanf(cmd.c_str() + 3, "%f#", &offset) == 1) {
-            timezoneOffsetHours = -offset;
-            if (DEBUG_LX200)
-                Serial.printf("[LX200] Timezone offset: %.1f h\n", timezoneOffsetHours);
-        }
+        int sign = (cmd.charAt(3) == '-') ? -1 : 1;
+        int h = 0, h2 = 0;
+        sscanf(cmd.c_str() + 4, "%02d.%d#", &h, &h2);
+        offset = sign * (h + h2 / 10.0);
+        timezoneOffsetHours = sign*offset;
+        if (DEBUG_LX200)    Serial.printf("[LX200] Timezone offset: %.1f h\n", timezoneOffsetHours);
         sendResponse("1");
     }
 
-    // --- SET LOCAL TIME :SL HH:MM:SS# (accettato, NTP ha precedenza) ---
+    // --- SET LOCAL TIME :SL HH:MM:SS# (aggiorna l'ora nell'oggetto telescope) ---
     else if (cmd.startsWith(":SL")) {
-        sendResponse("1");
+        int h = 0, m = 0, s = 0;
+        if (sscanf(cmd.c_str() + 3, "%d:%d:%d#", &h, &m, &s) == 3) {
+            // Prendi la data attuale dal telescope, modifica solo l'ora
+            struct tm timeinfo = telescope.date;
+            timeinfo.tm_hour = h;
+            timeinfo.tm_min = m;
+            timeinfo.tm_sec = s;
+            
+            // Aggiorna il telescope
+            telescope.setLX200Date(timeinfo);
+            lx200TimeManual = true;
+            
+            if (DEBUG_LX200) Serial.printf("[LX200] Ora impostata a: %02d:%02d:%02d\n", h, m, s);
+            sendResponse("1");
+        } else {
+            sendResponse("0");
+        }
     }
 
     // --- UNKNOWN ---
@@ -519,23 +562,22 @@ void sendResponse(const String &res) {
 //  Condivisa da entrambi i protocolli
 // =============================================================================
 void executeGoto() {
-    double lst   = calcLST();
-    double ha_h  = lst - targetRA_h;
-    while (ha_h >  12.0) ha_h -= 24.0;
-    while (ha_h < -12.0) ha_h += 24.0;
+    // Converte RA (ore) → arcsec*100  e  DEC (gradi) → arcsec*100
+    // Lo STM32 riceve coordinate assolute in arcsec*100 e le converte in
+    // passi motore internamente (inclusa la conversione RA→HA con il suo clock)
+    long ra_arcsec100  = (long)(targetRA_h    * 15.0 * 3600.0 * 100.0);
+    long dec_arcsec100 = (long)(targetDEC_deg *        3600.0 * 100.0);
 
-    long ra_steps  = haToDegSteps(ha_h);
-    long dec_steps = decDegToSteps(targetDEC_deg);
-
-    Serial.printf("[GOTO] RA=%.4fh DEC=%.4f° → RA_steps=%ld DEC_steps=%ld\n",
-                  targetRA_h, targetDEC_deg, ra_steps, dec_steps);
+    if (DEBUG_LX200_MODBUS) {
+        Serial.printf("[GOTO] RA=%.4fh DEC=%.4f deg -> RA_arcsec100=%ld DEC_arcsec100=%ld\n",
+                      targetRA_h, targetDEC_deg, ra_arcsec100, dec_arcsec100);
+    }
 
     telescope.setSlewing(true);
 
-																				   
-    GotoCmd cmd = { ra_steps, dec_steps };
+    GotoCmd cmd = { ra_arcsec100, dec_arcsec100 };
     if (xQueueSend(gotoQueue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-        Serial.println("[WARN] Coda GOTO piena, comando scartato.");
+        if (DEBUG_LX200) { Serial.println("[WARN] Coda GOTO piena, comando scartato."); }
         telescope.setSlewing(false);
     }
 }
@@ -561,7 +603,7 @@ void parseStelBinaryPacket(uint8_t* buf, int len) {
     targetDEC_deg = ((double)dec_raw / 0x3FFFFFFFL)  * 90.0;
     targetSet     = true;
 
-    Serial.printf("[BIN] GOTO → RA=%.4f h  DEC=%.4f°\n", targetRA_h, targetDEC_deg);
+    if (DEBUG_LX200) { Serial.printf("[BIN] GOTO → RA=%.4f h  DEC=%.4f°\n", targetRA_h, targetDEC_deg); }
     executeGoto();
 }
 
@@ -573,6 +615,7 @@ void modbusTask(void* pvParams) {
     // FIX [10]: registra questo task nel watchdog
     esp_task_wdt_add(nullptr);
 
+    static unsigned long lastPosRead = 0;
     for (;;) {
         esp_task_wdt_reset();   // keep-alive watchdog
 
@@ -603,44 +646,87 @@ void modbusTask(void* pvParams) {
 
             uint8_t result = modbus.writeMultipleRegisters(REG_RA_HIGH, 5);
             if (result != modbus.ku8MBSuccess) {
-                Serial.printf("[Modbus] Errore scrittura: 0x%02X\n", result);
+                if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore scrittura: 0x%02X\n", result); }
                 telescope.setSlewing(false);
                 continue;
             }
 
-            // FIX [3]: polling status – aggiorna posizione solo quando done
-            const int MAX_POLL = 120;   // max ~12 secondi (100 ms * 120)
+            // Polling status STM32 fino a TRACKING (done) o ERROR o timeout
+            // Ogni iterazione legge davvero i registri Modbus e aggiorna telescope
+            const int MAX_POLL = 300;   // max ~30 secondi (100 ms * 300)
+            bool gotoFinished = false;
             for (int i = 0; i < MAX_POLL; i++) {
                 esp_task_wdt_reset();
                 vTaskDelay(pdMS_TO_TICKS(100));
 
-                result = modbus.readHoldingRegisters(REG_STATUS, 1);
-                if (result != modbus.ku8MBSuccess) continue;
+                readPositionFromModbus();   // aggiorna telescope.status, ra, dec
 
-                uint16_t status = modbus.getResponseBuffer(0);
-                if (status == 2) {          // done
-                    // FIX [3]: aggiorna la posizione corrente solo ora
-                    currentRA_h    = targetRA_h;
-                    currentDEC_deg = targetDEC_deg;
-                    telescope.ra   = targetRA_h;
-                    telescope.dec  = targetDEC_deg;
+                if (telescope.status == State::SLEWING) {
+                    // ancora in movimento, continua
+                } else if (telescope.status == State::TRACKING) {
+                    if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
                     telescope.setSlewing(false);
-                    Serial.println("[Modbus] GOTO completato, posizione aggiornata.");
+                    gotoFinished = true;
                     break;
-                } else if (status == 3) {   // error
-                    Serial.println("[Modbus] STM32 ha riportato errore GOTO.");
+                } else if (telescope.status == State::ERROR) {
+                    if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 ha riportato errore GOTO."); }
                     telescope.setSlewing(false);
+                    gotoFinished = true;
                     break;
+                } else if (telescope.status == State::IDLE) {
+                    // STM32 tornato IDLE senza passare per TRACKING: GOTO non partito?
+                    if (i > 2) {   // ignora i primi cicli (latenza comando)
+                        if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 IDLE durante GOTO, uscita."); }
+                        telescope.setSlewing(false);
+                        gotoFinished = true;
+                        break;
+                    }
                 }
-                // status 0 (idle) o 1 (moving): continua polling
             }
 
-            // Timeout
-            if (telescope.isSlewing) {
-                Serial.println("[Modbus] Timeout polling STM32.");
+            if (!gotoFinished) {
+                if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] Timeout polling STM32."); }
                 telescope.setSlewing(false);
             }
+            lastPosRead = millis();   // evita doppia lettura immediata a fine GOTO
         }
+
+        // Lettura periodica della posizione corrente (~3 volte/secondo)
+        if (millis() - lastPosRead >= 333) {
+            lastPosRead = millis();
+            readPositionFromModbus();
+        }
+    }
+}
+
+// =============================================================================
+//  Legge STATUS + posizione corrente da STM32 (REG 5..9, 5 registri)
+//  Aggiorna telescope.status, telescope.ra, telescope.dec, currentRA_h, currentDEC_deg
+// =============================================================================
+void readPositionFromModbus() {
+    uint8_t result = modbus.readHoldingRegisters(REG_STATUS, 5);
+    if (result == modbus.ku8MBSuccess) {
+        telescope.status = static_cast<State>(modbus.getResponseBuffer(0) & 0xF);
+
+        // RA e DEC sono in arcsec*100, signed 32-bit, split su due 16-bit registers
+        int32_t ra_arcsec100  = (int32_t)((uint32_t)modbus.getResponseBuffer(1) << 16
+                                         | (uint32_t)modbus.getResponseBuffer(2));
+        int32_t dec_arcsec100 = (int32_t)((uint32_t)modbus.getResponseBuffer(3) << 16
+                                         | (uint32_t)modbus.getResponseBuffer(4));
+
+        // arcsec*100 → gradi → ore (solo RA)
+        currentRA_h    = (ra_arcsec100  / 100.0) / 3600.0 / 15.0;
+        currentDEC_deg = (dec_arcsec100 / 100.0) / 3600.0;
+        telescope.ra   = currentRA_h;
+        telescope.dec  = currentDEC_deg;
+        telescope.isSlewing = (telescope.status == State::SLEWING);
+
+        if (DEBUG_LX200_FULL) {
+            Serial.printf("[Modbus] Status=%d RA=%.4fh DEC=%.4f°\n",
+                          (int)telescope.status, currentRA_h, currentDEC_deg);
+        }
+    } else {
+        if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore lettura posizione: 0x%02X\n", result); }
     }
 }
 
@@ -672,19 +758,6 @@ void sendCurrentPosition(WiFiClient& client) {
     pkt[20] = 0; pkt[21] = 0; pkt[22] = 0; pkt[23] = 0;
 
     client.write(pkt, 24);
-}
-
-// =============================================================================
-//  Conversioni coordinate → passi motore
-// =============================================================================
-long haToDegSteps(double ha_h) {
-    double ha_deg = ha_h * 15.0;
-    return (long)(ha_deg / 360.0 * STEPS_PER_REV);
-}
-
-long decDegToSteps(double dec_deg) {
-    // DEC range [-90, +90]: usiamo 180° come fondo scala per i passi
-    return (long)(dec_deg / 180.0 * STEPS_PER_REV);
 }
 
 // =============================================================================

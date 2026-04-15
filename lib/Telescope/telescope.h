@@ -1,13 +1,20 @@
 #include <math.h>
 #include <stdio.h>
 
+enum class State : uint16_t {
+    IDLE = 0,
+    SLEWING = 1,
+    TRACKING = 2,
+    ERROR = 3
+};
+
 class Telescope {
 public:
     const char *fw_ver = "004 24 2026#";
     struct tm fw_time;
     struct tm date;
 
-
+    State status = State::IDLE;
     double latitude;    // gradi decimali, Nord positivo
     double longitude;   // gradi decimali, Est positivo
     double ra;          // ore decimali [0,24)
@@ -56,8 +63,13 @@ public:
                 fw_time.tm_sec);
     }
 
-    void setLX200Date(const struct tm &t) {
+    void setLX200FwTime(const struct tm &t) {
+        fw_time = t;
+    }
+
+    bool setLX200Date(const struct tm &t) {
         date = t;
+        return true;
     }
 
     void getLX200Date(char *out) {

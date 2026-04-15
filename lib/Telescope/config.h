@@ -7,8 +7,9 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── Debug Flags ───────────────────────────────────────────────────────────
-#define DEBUG_LX200      true
-#define DEBUG_LX200_FULL false
+#define DEBUG_LX200         true
+#define DEBUG_LX200_FULL    false
+#define DEBUG_LX200_MODBUS  true
 
 // ── WiFi flags ────────────────────────────────────────────────────────────
 const char* WIFI_SSID     = secrets.getSSID();
@@ -44,6 +45,11 @@ const long STEPS_PER_REV = (long)GEAR_TEETH * MOTOR_STEPS * MICROSTEPPING;
 #define REG_DEC_LOW     3
 #define REG_COMMAND     4
 #define REG_STATUS      5   // 0=idle, 1=moving, 2=done, 3=error
+#define REG_CURRENT_RA_HIGH  6
+#define REG_CURRENT_RA_LOW   7
+#define REG_CURRENT_DEC_HIGH 8
+#define REG_CURRENT_DEC_LOW  9
+#define REG_ERROR_CODE       10
 
 // Watchdog: se il task Modbus non fa reset entro 5 s viene riavviato
 #define WDT_TIMEOUT_S   5
