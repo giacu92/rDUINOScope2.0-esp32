@@ -86,7 +86,7 @@ double  calcLST();
 void    handleStellarium();
 void    processLX200Command(const String &cmd);
 void    sendResponse(const String &res);
-void    executeGoto();
+bool    executeGoto();
 void    parseStelBinaryPacket(uint8_t* buf, int len);
 void    sendCurrentPosition(WiFiClient& client);
 void    preTransmission();
@@ -358,8 +358,13 @@ void processLX200Command(const String &cmd) {
     // Comando vuoto (solo '#'): Stellarium lo manda come flush/ping, ignora silenziosamente
     if (cmd == "#" || cmd.length() == 0) return;
 
+    if (DEBUG_LX200 && (cmd.startsWith(":S") || cmd.startsWith(":M"))) {
+        Serial.print("[LX200 CMD] ");
+        Serial.println(cmd);
+    }
+
     // --- SYNC :CM# ---
-    else if (cmd.startsWith(":CM#")) {
+    if (cmd.startsWith(":CM#")) {
         telescope.getLX200Sync(reply);
         sendResponse(reply);
     }
@@ -447,6 +452,8 @@ void processLX200Command(const String &cmd) {
         int parsed = sscanf(cmd.c_str() + 4, "%d*%d'%d#", &d, &m, &s);
         if (parsed < 2) parsed = sscanf(cmd.c_str() + 4, "%d*%d:%d#", &d, &m, &s);
         if (parsed < 2) parsed = sscanf(cmd.c_str() + 4, "%d*%d#", &d, &m);
+        if (parsed < 2) parsed = sscanf(cmd.c_str() + 4, "%d:%d:%d#", &d, &m, &s);
+        if (parsed < 2) parsed = sscanf(cmd.c_str() + 4, "%d:%d#", &d, &m);
         bool decParsed = parsed >= 2;
         if (decParsed) {
             targetDEC_deg = sign * (d + m / 60.0 + s / 3600.0);
@@ -455,7 +462,13 @@ void processLX200Command(const String &cmd) {
             sendResponse("1");
             if (DEBUG_LX200) Serial.printf("[LX200] Target DEC: %.4f°\n", targetDEC_deg);
         }
-        if (!decParsed) sendResponse("0");
+        if (!decParsed) {
+            if (DEBUG_LX200) {
+                Serial.print("[WARN] :Sd non valido: ");
+                Serial.println(cmd);
+            }
+            sendResponse("0");
+        }
     }
     // --- SET TARGET RA :SrHH:MM:SS#  FIX [2] ---
     else if (cmd.startsWith(":Sr")) {
@@ -485,8 +498,12 @@ void processLX200Command(const String &cmd) {
     // --- GOTO :MS#  FIX [2] ---
     else if (cmd.startsWith(":MS#")) {
         if (targetSet) {
-            executeGoto();
-            sendResponse("0");
+            if (DEBUG_LX200) {
+                Serial.printf("[LX200] :MS# start GOTO RA=%.4fh DEC=%.4f deg\n",
+                              targetRA_h,
+                              targetDEC_deg);
+            }
+            sendResponse(executeGoto() ? "0" : "1Goto queue full#");
         } else {
             // LX200: "1" = oggetto sotto orizzonte / non pronto
             Serial.printf("[WARN] :MS# ricevuto senza target valido (RA=%d DEC=%d)\n",
@@ -494,6 +511,13 @@ void processLX200Command(const String &cmd) {
                           targetDECSet ? 1 : 0);
             sendResponse("1No target set#");
         }
+    }
+
+    // --- MANUAL SLEW (:Mn#/:Ms#/:Me#/:Mw#) ---
+    // Stellarium/SkySafari possono inviare questi durante alcuni controlli manuali.
+    else if (cmd.startsWith(":Mn#") || cmd.startsWith(":Ms#") ||
+             cmd.startsWith(":Me#") || cmd.startsWith(":Mw#")) {
+        sendResponse("");
     }
 
     // --- PRODUCT NAME ---
@@ -623,7 +647,7 @@ void sendResponse(const String &res) {
 //  executeGoto  –  FIX [2]: usa targetRA_h / targetDEC_deg
 //  Condivisa da entrambi i protocolli
 // =============================================================================
-void executeGoto() {
+bool executeGoto() {
     // Converte RA (ore) → arcsec*100  e  DEC (gradi) → arcsec*100
     // Lo STM32 riceve coordinate assolute in arcsec*100 e le converte in
     // passi motore internamente (inclusa la conversione RA→HA con il suo clock)
@@ -641,7 +665,10 @@ void executeGoto() {
     if (xQueueSend(gotoQueue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
         if (DEBUG_LX200) { Serial.println("[WARN] Coda GOTO piena, comando scartato."); }
         telescope.setSlewing(false);
+        return false;
     }
+
+    return true;
 }
 
 // =============================================================================
