@@ -39,26 +39,28 @@ const int   DAYLIGHT_OFFSET_SEC   =  3600;   // ora legale
 // ── Feature flags ─────────────────────────────────────────────────────────
 const long STEPS_PER_REV = (long)GEAR_TEETH * MOTOR_STEPS * MICROSTEPPING;
 
-#define REG_RA_HIGH     0
-#define REG_RA_LOW      1
-#define REG_DEC_HIGH    2
-#define REG_DEC_LOW     3
-#define REG_COMMAND     4
-#define REG_STATUS      5   // 0=idle, 1=slewing, 2=tracking, 3=error, 4=motors disabled, 5=manual jog
-#define REG_CURRENT_RA_HIGH  6
-#define REG_CURRENT_RA_LOW   7
-#define REG_CURRENT_DEC_HIGH 8
-#define REG_CURRENT_DEC_LOW  9
-#define REG_ERROR_CODE       10
+// Modbus Master request registers: written by ESP32, observed by STM32.
+#define REG_REQ_TARGET_RA_HIGH     0
+#define REG_REQ_TARGET_RA_LOW      1
+#define REG_REQ_TARGET_DEC_HIGH    2
+#define REG_REQ_TARGET_DEC_LOW     3
+#define REG_REQ_COMMAND            4
 
-// Milestone 0 mount-control extension. These registers are written by ESP32
-// and consumed by STM32 when REG_COMMAND contains the matching command code.
-#define REG_TRACKING_ENABLE  11  // 0=off, 1=on
-#define REG_TRACKING_MODE    12  // 0=lunar, 1=sidereal, 2=solar
-#define REG_MOTORS_ENABLE    13  // 0=disabled, 1=enabled
-#define REG_JOG_AXIS         14  // 0=RA, 1=DEC
-#define REG_JOG_DIRECTION    15  // 0=negative/west/south, 1=positive/east/north
-#define REG_JOG_SPEED        16  // implementation-defined speed/profile
+// Modbus Slave response registers: written by STM32, read by ESP32.
+#define REG_RES_STATUS             5   // 0=idle, 1=slewing, 2=tracking, 3=error, 4=motors disabled, 5=manual jog
+#define REG_RES_CURRENT_RA_HIGH  6
+#define REG_RES_CURRENT_RA_LOW   7
+#define REG_RES_CURRENT_DEC_HIGH 8
+#define REG_RES_CURRENT_DEC_LOW  9
+#define REG_RES_ERROR_CODE       10
+
+// Milestone 0 request registers.
+#define REG_REQ_TRACKING_ENABLE  11  // 0=off, 1=on
+#define REG_REQ_TRACKING_MODE    12  // 0=lunar, 1=sidereal, 2=solar
+#define REG_REQ_MOTORS_ENABLE    13  // 0=disabled, 1=enabled
+#define REG_REQ_JOG_AXIS         14  // 0=RA, 1=DEC
+#define REG_REQ_JOG_DIRECTION    15  // 0=negative/west/south, 1=positive/east/north
+#define REG_REQ_JOG_SPEED        16  // implementation-defined speed/profile
 
 #define CMD_NONE             0
 #define CMD_GOTO             1

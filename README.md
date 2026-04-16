@@ -106,8 +106,8 @@ RA  = hours * 15 * 3600 * 100
 DEC = degrees * 3600 * 100
 ```
 
-Those signed 32-bit values are split across two 16-bit registers each and sent
-to the STM32 together with `COMMAND=1`.
+Those signed 32-bit values are split across two 16-bit request registers each
+and sent to the STM32 together with `REG_REQ_COMMAND=1`.
 
 The STM32 owns the actual movement. It performs acceleration, deceleration,
 tracking transition, and error handling. The ESP32 polls the STM32 status and
@@ -116,7 +116,10 @@ position registers, then reports the current position back to Stellarium.
 Milestone 0 extends the same boundary with high-level mount controls for the
 future local UI: tracking enable/mode, motors enable/disable, and manual jog.
 The ESP32 still does not generate motor pulses; it only writes intent into
-Modbus registers and pulses `REG_COMMAND`.
+Modbus registers. Registers named `REG_REQ_*` are Modbus Master-owned requests;
+registers named `REG_RES_*` are Modbus Slave-owned responses. STM32 observes
+`REG_REQ_COMMAND` and acts on changes, but it does not write or clear request
+registers.
 
 The STM32 firmware already defines `CMD_SYNC=3` and `CMD_FOLLOW_TARGET=4`; the
 ESP32 keeps those values reserved. Manual jog intentionally uses dedicated
@@ -130,25 +133,25 @@ The ESP32 and STM32 share this compact register map:
 
 | Register | Name | Direction from ESP32 view | Meaning |
 | :-- | :-- | :-- | :-- |
-| 0 | `REG_RA_HIGH` | Write | Target RA high word |
-| 1 | `REG_RA_LOW` | Write | Target RA low word |
-| 2 | `REG_DEC_HIGH` | Write | Target DEC high word |
-| 3 | `REG_DEC_LOW` | Write | Target DEC low word |
-| 4 | `REG_COMMAND` | Write | `1` GOTO, `2` STOP |
-| 5 | `REG_STATUS` | Read | STM32 state |
-| 6 | `REG_CURRENT_RA_HIGH` | Read | Current RA high word |
-| 7 | `REG_CURRENT_RA_LOW` | Read | Current RA low word |
-| 8 | `REG_CURRENT_DEC_HIGH` | Read | Current DEC high word |
-| 9 | `REG_CURRENT_DEC_LOW` | Read | Current DEC low word |
-| 10 | `REG_ERROR_CODE` | Read | STM32 error code |
-| 11 | `REG_TRACKING_ENABLE` | Write | `0` off, `1` on |
-| 12 | `REG_TRACKING_MODE` | Write | `0` lunar, `1` sidereal, `2` solar |
-| 13 | `REG_MOTORS_ENABLE` | Write | `0` disabled, `1` enabled |
-| 14 | `REG_JOG_AXIS` | Write | `0` RA, `1` DEC |
-| 15 | `REG_JOG_DIRECTION` | Write | `0` negative/west/south, `1` positive/east/north |
-| 16 | `REG_JOG_SPEED` | Write | STM32-defined jog speed/profile |
+| 0 | `REG_REQ_TARGET_RA_HIGH` | Write | Target RA high word |
+| 1 | `REG_REQ_TARGET_RA_LOW` | Write | Target RA low word |
+| 2 | `REG_REQ_TARGET_DEC_HIGH` | Write | Target DEC high word |
+| 3 | `REG_REQ_TARGET_DEC_LOW` | Write | Target DEC low word |
+| 4 | `REG_REQ_COMMAND` | Write | ESP32-owned command request/state |
+| 5 | `REG_RES_STATUS` | Read | STM32 state |
+| 6 | `REG_RES_CURRENT_RA_HIGH` | Read | Current RA high word |
+| 7 | `REG_RES_CURRENT_RA_LOW` | Read | Current RA low word |
+| 8 | `REG_RES_CURRENT_DEC_HIGH` | Read | Current DEC high word |
+| 9 | `REG_RES_CURRENT_DEC_LOW` | Read | Current DEC low word |
+| 10 | `REG_RES_ERROR_CODE` | Read | STM32 error code |
+| 11 | `REG_REQ_TRACKING_ENABLE` | Write | `0` off, `1` on |
+| 12 | `REG_REQ_TRACKING_MODE` | Write | `0` lunar, `1` sidereal, `2` solar |
+| 13 | `REG_REQ_MOTORS_ENABLE` | Write | `0` disabled, `1` enabled |
+| 14 | `REG_REQ_JOG_AXIS` | Write | `0` RA, `1` DEC |
+| 15 | `REG_REQ_JOG_DIRECTION` | Write | `0` negative/west/south, `1` positive/east/north |
+| 16 | `REG_REQ_JOG_SPEED` | Write | STM32-defined jog speed/profile |
 
-Command values written to `REG_COMMAND`:
+Command values written to `REG_REQ_COMMAND`:
 
 | Value | Command |
 | :-- | :-- |
@@ -162,8 +165,8 @@ Command values written to `REG_COMMAND`:
 | 7 | `CMD_JOG_START` |
 | 8 | `CMD_JOG_STOP` |
 
-`CMD_JOG_START` reads `REG_JOG_AXIS`, `REG_JOG_DIRECTION`, and
-`REG_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested
+`CMD_JOG_START` reads `REG_REQ_JOG_AXIS`, `REG_REQ_JOG_DIRECTION`, and
+`REG_REQ_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested
 axis until `CMD_JOG_STOP` or `CMD_STOP` arrives. `CMD_JOG_STOP` is the normal
 button-release path; `CMD_STOP` remains the priority abort path.
 
