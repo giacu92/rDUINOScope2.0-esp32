@@ -31,8 +31,8 @@ La repo attuale implementa soprattutto il bridge di comunicazione:
 - LED RGB di stato.
 
 Non sono ancora presenti display grafico, touchscreen, cataloghi locali,
-allineamento, sensori ambientali, GPS/RTC locali, gestione SD, menu utente,
-joystick, buzzer, ventole, night mode e log osservazioni.
+allineamento, sensori ambientali, GPS/RTC locali, storage offline cataloghi,
+menu utente, joystick, buzzer, ventole, night mode e log osservazioni.
 
 ## Architettura da raggiungere
 
@@ -47,6 +47,120 @@ separazione:
 
 Ogni funzione legacy che muove direttamente i pin step/dir va quindi tradotta in
 un comando o stato condiviso con STM32, non copiata 1:1 sull'ESP32.
+
+## Decisioni architetturali e note di progetto
+
+Queste regole servono a evitare di ricreare il monolite legacy con hardware piu
+moderno. Il porting deve recuperare i comportamenti utili, non copiare la
+struttura `.ino` globale del vecchio firmware.
+
+Decisioni vincolanti:
+
+- ESP32 non genera step pulse.
+- STM32 e proprietario del moto: pulse generation, tracking deterministico,
+  accelerazione/decelerazione, stop, errori meccanici e sicurezza motori.
+- ESP32 e proprietario di UI, cataloghi, rete, sorgenti tempo/posizione,
+  aggiornamenti OTA, sensori utente e comandi alto livello.
+- SD e lo storage principale per cataloghi, immagini, star map, report, backup,
+  import/export e file scaricati.
+- NVS/Preferences va usato solo per configurazione piccola e robusta.
+- OTA firmware ESP32 solo manuale da interfaccia, mai automatico o silenzioso.
+- GPS, RTC, NTP e LX200 devono avere priorita esplicite e non sovrascriversi in
+  modo opaco.
+- BME280 sostituisce DHT22.
+
+Stato applicativo:
+
+- Creare uno stato centrale, per esempio `MountState`/`AppState`, con tempo,
+  sito, oggetto selezionato, coordinate attuali, target, tracking mode, stato
+  STM32, stato sensori, stato WiFi/OTA e schermata corrente.
+- La UI deve leggere lo stato e inviare eventi/comandi. Non deve manipolare
+  direttamente motori, Modbus, SD e sensori in mezzo al rendering.
+- I servizi hardware devono aggiornare lo stato con interfacce piccole e
+  testabili.
+
+Protocollo STM32 prima della UI avanzata:
+
+- Prima di portare joystick, tracking solar/lunar, meridian flip e motors
+  on/off serve estendere Modbus con comandi chiari.
+- I bottoni UI devono inviare comandi alto livello, non replicare la vecchia
+  logica step/dir.
+- Lo stato STM32 deve essere leggibile in modo abbastanza ricco da mostrare
+  all'utente cosa sta succedendo: idle, slewing, tracking, error, disabled,
+  manual jog, eventuale flip.
+
+Cataloghi e aggiornamenti dati:
+
+- Aggiungere su SD un manifest, per esempio `/catalogs/manifest.json`, con
+  versione cataloghi, data, checksum e lista file.
+- L'update cataloghi da GitHub deve scaricare su file temporaneo, validare,
+  chiedere conferma e solo dopo sostituire i file correnti.
+- Evitare overwrite ciechi: se download o parse fallisce, restano validi i
+  cataloghi precedenti.
+
+Firmware OTA:
+
+- Verificare presto il partizionamento in `platformio.ini`: OTA richiede una
+  configurazione partizioni compatibile con il firmware finale.
+- Il flusso OTA deve mostrare versione installata, versione remota, stato
+  download, verifica e riavvio.
+- L'aggiornamento firmware richiede alimentazione stabile e WiFi connesso.
+
+Schermate consigliate:
+
+- Tenere `Options` per impostazioni operative: luminosita, timeout, suono,
+  motori, tracking, meridian flip.
+- Aggiungere una schermata `System` o `About` per WiFi/IP, firmware, OTA, SD,
+  RTC, GPS, BME280, Modbus e diagnostica.
+- Il pulsante `Controlla aggiornamenti` dovrebbe stare in `System`/`About`,
+  oppure in una sezione chiaramente separata di `Options`.
+
+Sorgenti tempo e posizione:
+
+- La UI deve partire anche senza fix GPS, usando ultimo sito salvato o default.
+- Il GPS non deve bloccare il boot: aggiorna posizione e tempo quando ha un fix
+  valido.
+- Il DS3231 va aggiornato solo da sorgenti affidabili: NTP valido, GPS con fix
+  valido, oppure impostazione manuale confermata.
+- Un client LX200/Stellarium non dovrebbe sovrascrivere automaticamente l'RTC
+  senza una policy esplicita.
+
+Sensore BME280:
+
+- Il BME280 va posizionato lontano da ESP32, regolatori e driver motori se deve
+  misurare l'ambiente reale.
+- Se resta dentro il box, va documentato come temperatura interna controller,
+  non come temperatura ambiente.
+- Log e UI devono chiarire cosa rappresenta la misura.
+
+Diagnostica e sviluppo:
+
+- Aggiungere un log rotante su SD, per esempio `/logs/system.log`, con boot,
+  errori sensori, errori Modbus, mount SD, GOTO falliti, OTA e aggiornamenti
+  cataloghi.
+- Prevedere una modalita `simulator`/`dry run` per sviluppare UI e cataloghi
+  senza STM32 o motori collegati.
+- In modalita simulatore il Modbus puo essere finto e la posizione puo convergere
+  gradualmente al target.
+
+Safety:
+
+- Tracking e GOTO del Sole devono richiedere conferma esplicita per sessione.
+- Il meridian flip non deve partire durante manual jog o durante un altro stato
+  critico.
+- Stop e motors off devono avere priorita su ogni altra azione.
+- Oggetti sotto orizzonte devono bloccare GOTO/tracking locale, salvo override
+  esplicito e consapevole se mai verra aggiunto.
+
+Qualita codice:
+
+- Evitare porting massivo dei file `.ino`.
+- Portare moduli testabili: astronomia, cataloghi, stato mount, storage,
+  sorgenti tempo, UI, hardware services.
+- Limitare l'uso di `String` nei parser cataloghi e nei loop frequenti per
+  ridurre frammentazione heap.
+- Le funzioni bloccanti legacy con `delay()`, attese touch o loop SD vanno
+  riscritte con task, timer o operazioni brevi compatibili con WiFi e OTA.
 
 ## Hardware e periferiche da portare
 
@@ -95,9 +209,9 @@ Da fare:
 - Creare router eventi touch equivalente a `considerTouchInput()`.
 - Gestire wake-up display al primo touch quando il backlight e spento.
 
-### Scheda SD
+### SD e dati offline
 
-Il legacy richiede SD per:
+Il legacy richiedeva SD per:
 
 - `messier.csv`
 - `treasure.csv`
@@ -107,16 +221,72 @@ Il legacy richiede SD per:
 - mappe stellari `<row>-<col>.bmp`
 - log/report osservazioni, oggi parzialmente dentro flussi legacy/BT
 
+Scelta aggiornata: teniamo la SD come storage principale e tagliamo la testa al
+toro. Cataloghi, immagini, star map, report e backup/import/export vivono sulla
+SD. Le opzioni piccole possono restare in NVS/Preferences per robustezza, con
+eventuale export/import su SD.
+
+Resta da valutare solo una eventuale SPI flash esterna come alternativa futura,
+ma non entra nel piano iniziale di porting.
+
+Si puo comunque prevedere download WiFi da repository remoto, per esempio GitHub
+raw/release asset, salvando gli aggiornamenti direttamente su SD dopo conferma
+utente.
+
 Da fare:
 
 - Decidere se usare SD SPI esterna o SD_MMC su ESP32-S3.
 - Definire pin CS o bus SD_MMC.
-- Portare loader cataloghi con parser robusto CSV, evitando parsing fragile con
+- Portare loader cataloghi con parser robusto CSV/JSON, evitando parsing fragile con
   indici `String` dove possibile.
-- Definire struttura directory sulla SD e documentarla.
-- Portare persistenza opzioni da `options.txt`, oppure migrare a NVS/Preferences
-  mantenendo import/export su SD.
+- Definire struttura directory sulla SD:
+  - `/catalogs/messier.csv`
+  - `/catalogs/treasure.csv`
+  - `/catalogs/custom.csv`
+  - `/objects/<OBJECT_NAME>.bmp`
+  - `/starmaps/<row>-<col>.bmp`
+  - `/reports/...`
+- Migrare persistenza opzioni da `options.txt` a NVS/Preferences, con eventuale
+  import/export da SD.
 - Portare asset BMP necessari o convertirli in un formato piu adatto.
+- Aggiungere updater cataloghi:
+  - controllo versione remota
+  - download su file temporaneo
+  - validazione formato
+  - conferma overwrite
+  - rollback se download o parse fallisce.
+
+### Aggiornamento firmware ESP32 via OTA
+
+La nuova interfaccia grafica dovra permettere anche l'aggiornamento del firmware
+ESP32 direttamente dal display, quando il controller e connesso a Internet.
+
+Scelta prevista:
+
+- Usare `safeGitHubOTA` o una libreria equivalente per aggiornare il firmware da
+  GitHub release/raw asset in modo controllato.
+- Aggiungere in una schermata grafica un pulsante tipo `Controlla aggiornamenti`.
+- Mostrare versione installata, versione remota disponibile, changelog sintetico
+  se disponibile, dimensione download e richiesta conferma.
+- Scaricare e applicare l'update solo con alimentazione stabile e WiFi connesso.
+- Prevedere messaggi chiari per:
+  - nessuna connessione Internet
+  - nessun aggiornamento disponibile
+  - download fallito
+  - verifica fallita
+  - aggiornamento completato e riavvio richiesto
+- Conservare un percorso di recovery: niente update automatici silenziosi e
+  nessun overwrite se la verifica fallisce.
+
+Da fare:
+
+- Definire repository/URL release firmware.
+- Decidere formato metadati update, per esempio JSON con versione, URL binario,
+  checksum e changelog breve.
+- Integrare controllo aggiornamenti nella UI, probabilmente in Options o in una
+  futura schermata System/About.
+- Aggiungere watchdog/progress UI durante download e flash.
+- Verificare compatibilita con partizioni OTA ESP32-S3 in `platformio.ini`.
 
 ### GPS U-Blox NEO
 
@@ -132,12 +302,30 @@ Da fare:
 
 - Definire UART e pin ESP32-S3 per GPS.
 - Integrare GPS con il modello tempo gia presente, che oggi usa NTP/LX200.
-- Stabilire precedenza sorgenti tempo: NTP, GPS, LX200 manuale, RTC.
+- Stabilire precedenza sorgenti tempo: LX200 manuale quando impostato
+  dall'utente, NTP se disponibile, GPS se ha fix valido, RTC come fallback
+  immediato all'avvio.
+- Stabilire precedenza posizione: GPS con fix valido, coordinate impostate da UI,
+  coordinate LX200/Stellarium, default di config.
 - Portare calcolo timezone e DST, o sostituirlo con una logica timezone piu
   esplicita/configurabile.
 - Portare schermata GPS con stato satelliti e fallback valori locali.
 
-### RTC DS3231
+Anche usando `pool.ntp.org`, la posizione del telescopio serve comunque:
+
+- latitudine e longitudine sono necessarie per LST, HA, ALT/AZ e visibilita
+  sopra orizzonte.
+- servono per decidere se un oggetto e osservabile.
+- servono per meridian flip e calcoli locali.
+- Stellarium puo inviare coordinate sito via LX200, ma non sempre e la sorgente
+  primaria.
+- altitudine non e critica quanto LAT/LON per la maggior parte dei calcoli GOTO,
+  ma va mantenuta per completezza, log e future correzioni.
+
+Conclusione consigliata: tenere GPS come sorgente automatica di posizione e come
+fallback tempo offline. NTP resta la sorgente tempo piu comoda quando c'e WiFi.
+
+### RTC DS3231 e batteria tampone
 
 Il legacy usa DS3231 via I2C:
 
@@ -145,6 +333,30 @@ Il legacy usa DS3231 via I2C:
 - Teensy: SDA/SCL 18/19.
 - temperatura RTC usata come test presenza.
 - `rtc.getTimeStr()`, `rtc.getDateStr()`, `rtc.setTime()`, `rtc.setDate()`.
+
+L'ESP32 ha RTC interno, ma non sostituisce completamente un DS3231 con batteria
+tampone:
+
+- L'RTC interno mantiene il tempo solo se il chip resta alimentato o in deep
+  sleep con alimentazione presente.
+- Non c'e una batteria tampone equivalente integrata nei devkit ESP32-S3 comuni.
+- Dopo power-off completo, senza rete e senza GPS, l'ESP32 non sa piu l'ora
+  corretta.
+- NTP risolve il problema solo quando il WiFi e disponibile.
+- GPS risolve il tempo anche offline, ma richiede fix/visibilita satelliti e un
+  tempo di acquisizione.
+
+Conclusione consigliata: mantenere un RTC esterno con batteria tampone se
+vogliamo avvio affidabile anche offline, senza WiFi e prima del fix GPS. Il
+DS3231 resta una buona scelta per precisione e semplicita I2C.
+
+Alternative possibili:
+
+- Solo NTP: hardware minimo, ma richiede rete.
+- Solo GPS: indipendente da Internet, ma non immediato e dipende dal segnale.
+- RTC interno ESP32 piu salvataggio ultimo epoch in NVS: utile come fallback
+  approssimato, non affidabile dopo lunghi spegnimenti.
+- DS3231 o equivalente I2C con coin cell/supercap: soluzione piu robusta.
 
 Da fare:
 
@@ -154,7 +366,7 @@ Da fare:
 - Aggiornare RTC quando NTP o GPS sono affidabili.
 - Portare schermata clock e modifica manuale data/ora.
 
-### DHT22 e ambiente
+### BME280 e ambiente
 
 Il legacy usa DHT22 su `DHTPIN=3`, aggiornato circa ogni 30 secondi:
 
@@ -163,10 +375,20 @@ Il legacy usa DHT22 su `DHTPIN=3`, aggiornato circa ogni 30 secondi:
 - visualizzazione su main screen
 - dati inseriti nei log osservazione
 
+Per la nuova versione sostituiamo DHT22 direttamente con BME280:
+
+- BME280 usa I2C/SPI, e piu stabile e generalmente piu affidabile del DHT22.
+- Fornisce temperatura, umidita e pressione atmosferica.
+- Mantiene la voce `Hum` del legacy senza cambiare UX.
+- La pressione puo essere utile per log ambientale e, in futuro, per correzioni
+  atmosferiche/refrazione.
+- Aggiornare UI e report per mostrare `Temp`, `Hum` e `Press`.
+
 Da fare:
 
-- Definire pin ESP32-S3.
-- Portare lettura DHT22 in task/timer non bloccante.
+- Definire bus I2C/SPI condiviso con RTC/touch/display dove sensato.
+- Aggiungere libreria BME280 compatibile ESP32.
+- Portare lettura sensore in task/timer non bloccante.
 - Aggiungere stato sensore non disponibile.
 - Collegare valori a UI e log.
 
@@ -279,7 +501,7 @@ Il legacy usa `CURRENT_SCREEN` come stato globale:
 | 4 | `drawMainScreen()` | Dashboard osservazione, oggetto, tempo, LST, ambiente |
 | 5 | `drawCoordinatesScreen()` | Coordinate correnti da posizione motori |
 | 6 | `drawLoadScreen()` | Selezione sorgente oggetti |
-| 7 | `drawOptionsScreen()` | Luminosita, timeout, tracking, meridian flip, suono, motori |
+| 7 | `drawOptionsScreen()` | Luminosita, timeout, tracking, meridian flip, suono, motori, update |
 | 10 | `drawSTATScreen()` | Report sessione osservativa |
 | 11 | `drawStarMap()` | Mappa stellare navigabile tramite BMP |
 | 12 | `drawStarSyncScreen()` | Scelta stella per allineamento |
@@ -304,6 +526,7 @@ Da fare:
   - oggetto sotto orizzonte
   - GOTO completato
   - errori SD/touch/sensori
+  - controllo e aggiornamento firmware OTA
 
 ## Cataloghi e oggetti
 
@@ -489,6 +712,8 @@ Per portare la ciccia serve aggiungere comandi/register per:
 - Caricare `messier.csv`, `treasure.csv`, `custom.csv`.
 - Mostrare load screen e dettagli oggetto.
 - Disegnare BMP oggetto se presente.
+- Aggiungere aggiornamento cataloghi via WiFi/GitHub con conferma overwrite.
+- Preparare partizioni e prerequisiti per OTA firmware ESP32.
 
 ### Milestone 3: astronomia locale
 
@@ -501,7 +726,7 @@ Per portare la ciccia serve aggiungere comandi/register per:
 
 - Portare RTC DS3231.
 - Portare GPS TinyGPSPlus.
-- Portare DHT22.
+- Portare BME280 al posto del DHT22 legacy.
 - Portare batteria.
 - Definire priorita NTP/GPS/RTC/LX200.
 
@@ -520,6 +745,15 @@ Per portare la ciccia serve aggiungere comandi/register per:
 - Portare star map BMP navigabile.
 - Portare calibrazione touch completa.
 
+### Milestone 7: manutenzione e update
+
+- Aggiungere schermata o sezione UI per versione firmware e aggiornamenti.
+- Integrare `safeGitHubOTA` o equivalente.
+- Implementare pulsante `Controlla aggiornamenti`.
+- Scaricare firmware da GitHub solo dopo conferma utente.
+- Verificare checksum/metadati prima del flash.
+- Mostrare progress, esito e richiesta di riavvio.
+
 ## Dipendenze PlatformIO previste
 
 Da valutare e aggiungere in modo incrementale:
@@ -528,8 +762,9 @@ Da valutare e aggiungere in modo incrementale:
 - `XPT2046_Touchscreen`.
 - `TinyGPSPlus`.
 - Libreria DS3231/RTClib compatibile ESP32.
-- Libreria DHT.
+- Libreria BME280, per esempio Adafruit BME280 o equivalente.
 - Driver SD/SdFat se serve piu controllo del filesystem.
+- `safeGitHubOTA` o libreria OTA equivalente per update firmware ESP32 da UI.
 
 ## Note importanti dal legacy
 
@@ -543,4 +778,3 @@ Da valutare e aggiungere in modo incrementale:
   frammentazione heap per cataloghi e parser.
 - La parte BT va ignorata, ma alcune funzioni richiamate anche da touch/UI
   devono restare: selezione oggetto, osservazioni, GOTO, tracking, suoni.
-
