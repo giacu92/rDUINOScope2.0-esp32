@@ -698,6 +698,41 @@ Per portare la ciccia serve aggiungere comandi/register per:
 
 ## Milestone consigliate
 
+### Milestone 0: contratto mount ESP32-STM32
+
+- Estendere la mappa Modbus senza spostare i registri GOTO esistenti.
+- Aggiungere comandi high-level per:
+  - tracking ON/OFF.
+  - tracking mode sidereal/solar/lunar.
+  - manual jog RA/DEC con direzione e velocita.
+  - motors power ON/OFF.
+  - stop prioritario.
+- Mantenere compatibilita numerica con lo STM32 attuale:
+  - `CMD_SYNC=3`
+  - `CMD_FOLLOW_TARGET=4`
+  - nuovi comandi da `5` in poi.
+- Preferire `CMD_JOG_START`/`CMD_JOG_STOP` dedicati al posto di usare
+  `FOLLOW_TARGET` per il manual move: il jog deve restare deterministico lato
+  STM32, con rampe, limiti, velocita e safety gestiti dal firmware motori.
+- Aggiungere stati STM32 piu espressivi:
+  - idle
+  - slewing
+  - tracking
+  - error
+  - disabled
+  - manual jog
+- Tenere ESP32 come mittente di intenti: nessuna generazione step/pulse lato
+  ESP32.
+- Preparare funzioni ESP32 riusabili dalla futura UI:
+  - `requestStop()`
+  - `requestTrackingEnabled()`
+  - `requestTrackingMode()`
+  - `requestMotorsEnabled()`
+  - `requestJog()`
+  - `requestJogStop()`
+- Documentare la nuova boundary nel README per mantenere STM32 e ESP32
+  allineati.
+
 ### Milestone 1: base display e touch
 
 - Aggiungere librerie display/touch a `platformio.ini`.

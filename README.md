@@ -113,6 +113,17 @@ The STM32 owns the actual movement. It performs acceleration, deceleration,
 tracking transition, and error handling. The ESP32 polls the STM32 status and
 position registers, then reports the current position back to Stellarium.
 
+Milestone 0 extends the same boundary with high-level mount controls for the
+future local UI: tracking enable/mode, motors enable/disable, and manual jog.
+The ESP32 still does not generate motor pulses; it only writes intent into
+Modbus registers and pulses `REG_COMMAND`.
+
+The STM32 firmware already defines `CMD_SYNC=3` and `CMD_FOLLOW_TARGET=4`; the
+ESP32 keeps those values reserved. Manual jog intentionally uses dedicated
+axis/direction/speed registers instead of `FOLLOW_TARGET`, so the STM32 remains
+responsible for jog speed profiles, acceleration, deceleration, limits, and
+safety handling.
+
 ## Modbus Register Boundary
 
 The ESP32 and STM32 share this compact register map:
@@ -130,6 +141,31 @@ The ESP32 and STM32 share this compact register map:
 | 8 | `REG_CURRENT_DEC_HIGH` | Read | Current DEC high word |
 | 9 | `REG_CURRENT_DEC_LOW` | Read | Current DEC low word |
 | 10 | `REG_ERROR_CODE` | Read | STM32 error code |
+| 11 | `REG_TRACKING_ENABLE` | Write | `0` off, `1` on |
+| 12 | `REG_TRACKING_MODE` | Write | `0` lunar, `1` sidereal, `2` solar |
+| 13 | `REG_MOTORS_ENABLE` | Write | `0` disabled, `1` enabled |
+| 14 | `REG_JOG_AXIS` | Write | `0` RA, `1` DEC |
+| 15 | `REG_JOG_DIRECTION` | Write | `0` negative/west/south, `1` positive/east/north |
+| 16 | `REG_JOG_SPEED` | Write | STM32-defined jog speed/profile |
+
+Command values written to `REG_COMMAND`:
+
+| Value | Command |
+| :-- | :-- |
+| 0 | `CMD_NONE` |
+| 1 | `CMD_GOTO` |
+| 2 | `CMD_STOP` |
+| 3 | `CMD_SYNC` |
+| 4 | `CMD_FOLLOW_TARGET` |
+| 5 | `CMD_SET_TRACKING` |
+| 6 | `CMD_SET_MOTORS` |
+| 7 | `CMD_JOG_START` |
+| 8 | `CMD_JOG_STOP` |
+
+`CMD_JOG_START` reads `REG_JOG_AXIS`, `REG_JOG_DIRECTION`, and
+`REG_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested
+axis until `CMD_JOG_STOP` or `CMD_STOP` arrives. `CMD_JOG_STOP` is the normal
+button-release path; `CMD_STOP` remains the priority abort path.
 
 State values mirror the STM32 firmware:
 
@@ -139,6 +175,8 @@ State values mirror the STM32 firmware:
 | 1 | `SLEWING` |
 | 2 | `TRACKING` |
 | 3 | `ERROR` |
+| 4 | `MOTORS_DISABLED` |
+| 5 | `MANUAL_JOG` |
 
 ## FreeRTOS Layout
 

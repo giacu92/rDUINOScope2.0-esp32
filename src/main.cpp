@@ -74,9 +74,25 @@ bool lx200Ready = false;
 static uint8_t binBuf[64];
 static int     binIdx = 0;
 
-// Coda FreeRTOS per i comandi GOTO verso STM32  FIX [9]
-struct GotoCmd { int32_t ra_steps; int32_t dec_steps; };
-QueueHandle_t gotoQueue;
+enum class MountCommandType : uint8_t {
+    GOTO,
+    STOP,
+    SET_TRACKING,
+    SET_MOTORS,
+    JOG_START,
+    JOG_STOP
+};
+
+struct MountCommand {
+    MountCommandType type;
+    int32_t ra_arcsec100;
+    int32_t dec_arcsec100;
+    uint16_t value1;
+    uint16_t value2;
+    uint16_t value3;
+};
+
+QueueHandle_t mountCommandQueue;
 
 unsigned long lastStelUpdate = 0;
 
@@ -105,12 +121,21 @@ void    handleStellarium();
 void    processLX200Command(const String &cmd);
 void    sendResponse(const String &res);
 bool    executeGoto();
+bool    requestStop();
+bool    requestTrackingEnabled(bool enabled);
+bool    requestTrackingMode(TrackingMode mode);
+bool    requestMotorsEnabled(bool enabled);
+bool    requestJog(uint16_t axis, uint16_t direction, uint16_t speed);
+bool    requestJogStop();
+bool    enqueueMountCommand(const MountCommand &cmd, TickType_t waitTicks = 0);
 void    parseStelBinaryPacket(uint8_t* buf, int len);
 void    sendCurrentPosition(WiFiClient& client);
 void    preTransmission();
 void    postTransmission();
 void    modbusTask(void* pvParams);
 void    readPositionFromModbus();
+void    applyMountCommand(const MountCommand &cmd);
+bool    writeCommandPulse(uint16_t command);
 double  raDeltaHours(double a, double b);
 bool    currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100);
 
@@ -132,8 +157,8 @@ void setup() {
     modbus.preTransmission(preTransmission);
     modbus.postTransmission(postTransmission);
 
-    // FIX [9]: crea la coda GOTO e il task Modbus
-    gotoQueue = xQueueCreate(4, sizeof(GotoCmd));
+    // FIX [9]: crea la coda comandi mount e il task Modbus
+    mountCommandQueue = xQueueCreate(8, sizeof(MountCommand));
     xTaskCreatePinnedToCore(modbusTask, "modbus", 4096, nullptr, 1, nullptr, 1);
 
     connectWiFi();
@@ -613,6 +638,9 @@ void processLX200Command(const String &cmd) {
     // Stellarium/SkySafari possono inviare questi durante alcuni controlli manuali.
     else if (cmd.startsWith(":Mn#") || cmd.startsWith(":Ms#") ||
              cmd.startsWith(":Me#") || cmd.startsWith(":Mw#")) {
+        uint16_t axis = (cmd.startsWith(":Mn#") || cmd.startsWith(":Ms#")) ? JOG_AXIS_DEC : JOG_AXIS_RA;
+        uint16_t direction = (cmd.startsWith(":Mn#") || cmd.startsWith(":Me#")) ? JOG_DIR_POSITIVE : JOG_DIR_NEGATIVE;
+        requestJog(axis, direction, JOG_SPEED_CENTER);
         sendResponse("");
     }
 
@@ -648,11 +676,13 @@ void processLX200Command(const String &cmd) {
     // --- ABORT :Q# ---
     else if (cmd.startsWith(":Q#") || cmd.startsWith("Q#")) {
         telescope.setSlewing(false);
-        // Invia comando STOP a STM32 tramite coda (non bloccante)
-        GotoCmd stopCmd = {0, 0};
-        // Usiamo ra_steps == INT32_MIN come segnale "STOP" nel task Modbus
-        stopCmd.ra_steps = INT32_MIN;
-        xQueueSend(gotoQueue, &stopCmd, 0);
+        requestStop();
+    }
+
+    // --- ABORT MANUAL SLEW AXIS (:Qn#/:Qs#/:Qe#/:Qw#) ---
+    else if (cmd.startsWith(":Qn#") || cmd.startsWith(":Qs#") ||
+             cmd.startsWith(":Qe#") || cmd.startsWith(":Qw#")) {
+        requestJogStop();
     }
 
     // --- SET LONGITUDE :SgsDDD*MM#  FIX [5]: parse separato ---
@@ -757,14 +787,98 @@ bool executeGoto() {
 
     telescope.setSlewing(true);
 
-    GotoCmd cmd = { ra_arcsec100, dec_arcsec100 };
-    if (xQueueSend(gotoQueue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
+    MountCommand cmd = {
+        MountCommandType::GOTO,
+        ra_arcsec100,
+        dec_arcsec100,
+        0,
+        0,
+        0
+    };
+    if (!enqueueMountCommand(cmd, pdMS_TO_TICKS(100))) {
         if (DEBUG_LX200) { Serial.println("[WARN] Coda GOTO piena, comando scartato."); }
         telescope.setSlewing(false);
         return false;
     }
 
     return true;
+}
+
+bool enqueueMountCommand(const MountCommand &cmd, TickType_t waitTicks) {
+    if (!mountCommandQueue) return false;
+    return xQueueSend(mountCommandQueue, &cmd, waitTicks) == pdTRUE;
+}
+
+bool requestStop() {
+    MountCommand cmd = { MountCommandType::STOP, 0, 0, 0, 0, 0 };
+    telescope.setSlewing(false);
+    return enqueueMountCommand(cmd);
+}
+
+bool requestTrackingEnabled(bool enabled) {
+    MountCommand cmd = {
+        MountCommandType::SET_TRACKING,
+        0,
+        0,
+        static_cast<uint16_t>(enabled ? 1U : 0U),
+        static_cast<uint16_t>(telescope.trackingMode),
+        0
+    };
+    if (enqueueMountCommand(cmd)) {
+        telescope.trackingEnabled = enabled;
+        return true;
+    }
+    return false;
+}
+
+bool requestTrackingMode(TrackingMode mode) {
+    MountCommand cmd = {
+        MountCommandType::SET_TRACKING,
+        0,
+        0,
+        static_cast<uint16_t>(telescope.trackingEnabled ? 1U : 0U),
+        static_cast<uint16_t>(mode),
+        0
+    };
+    if (enqueueMountCommand(cmd)) {
+        telescope.trackingMode = mode;
+        return true;
+    }
+    return false;
+}
+
+bool requestMotorsEnabled(bool enabled) {
+    MountCommand cmd = {
+        MountCommandType::SET_MOTORS,
+        0,
+        0,
+        static_cast<uint16_t>(enabled ? 1U : 0U),
+        0,
+        0
+    };
+    if (enqueueMountCommand(cmd)) {
+        telescope.motorsEnabled = enabled;
+        if (!enabled) telescope.setSlewing(false);
+        return true;
+    }
+    return false;
+}
+
+bool requestJog(uint16_t axis, uint16_t direction, uint16_t speed) {
+    MountCommand cmd = {
+        MountCommandType::JOG_START,
+        0,
+        0,
+        axis,
+        direction,
+        speed
+    };
+    return enqueueMountCommand(cmd);
+}
+
+bool requestJogStop() {
+    MountCommand cmd = { MountCommandType::JOG_STOP, 0, 0, 0, 0, 0 };
+    return enqueueMountCommand(cmd);
 }
 
 // =============================================================================
@@ -806,24 +920,17 @@ void modbusTask(void* pvParams) {
     for (;;) {
         esp_task_wdt_reset();   // keep-alive watchdog
 
-        GotoCmd cmd;
-        if (xQueueReceive(gotoQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE) {
-
-            // Segnale STOP (RA == INT32_MIN)
-            if (cmd.ra_steps == INT32_MIN) {
-                modbus.setTransmitBuffer(0, 0);
-                modbus.setTransmitBuffer(1, 0);
-                modbus.setTransmitBuffer(2, 0);
-                modbus.setTransmitBuffer(3, 0);
-                modbus.setTransmitBuffer(4, 0x0002);  // CMD_STOP
-                modbus.writeMultipleRegisters(REG_RA_HIGH, 5);
+        MountCommand cmd;
+        if (xQueueReceive(mountCommandQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (cmd.type != MountCommandType::GOTO) {
+                applyMountCommand(cmd);
                 continue;
             }
 
-            uint16_t ra_high  = (uint16_t)((cmd.ra_steps  >> 16) & 0xFFFF);
-            uint16_t ra_low   = (uint16_t)( cmd.ra_steps         & 0xFFFF);
-            uint16_t dec_high = (uint16_t)((cmd.dec_steps >> 16) & 0xFFFF);
-            uint16_t dec_low  = (uint16_t)( cmd.dec_steps        & 0xFFFF);
+            uint16_t ra_high  = (uint16_t)((cmd.ra_arcsec100  >> 16) & 0xFFFF);
+            uint16_t ra_low   = (uint16_t)( cmd.ra_arcsec100         & 0xFFFF);
+            uint16_t dec_high = (uint16_t)((cmd.dec_arcsec100 >> 16) & 0xFFFF);
+            uint16_t dec_low  = (uint16_t)( cmd.dec_arcsec100        & 0xFFFF);
 
             uint8_t resetResult = modbus.writeSingleRegister(REG_COMMAND, 0x0000);
             if (resetResult != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
@@ -835,7 +942,7 @@ void modbusTask(void* pvParams) {
             modbus.setTransmitBuffer(1, ra_low);
             modbus.setTransmitBuffer(2, dec_high);
             modbus.setTransmitBuffer(3, dec_low);
-            modbus.setTransmitBuffer(4, 0x0001);  // CMD_GOTO
+            modbus.setTransmitBuffer(4, CMD_GOTO);
             
             if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] sending: RA_high=0x%04X RA_low=0x%04X DEC_high=0x%04X DEC_low=0x%04X COMMAND=%d\n",
                           ra_high, ra_low, dec_high, dec_low, 1); }
@@ -875,7 +982,7 @@ void modbusTask(void* pvParams) {
                         }
                     }
                 } else if (telescope.status == State::TRACKING) {
-                    if (sawSlewing || currentPositionMatchesTarget(cmd.ra_steps, cmd.dec_steps)) {
+                    if (sawSlewing || currentPositionMatchesTarget(cmd.ra_arcsec100, cmd.dec_arcsec100)) {
                         if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
                         telescope.setSlewing(false);
                         gotoFinished = true;
@@ -916,6 +1023,76 @@ void modbusTask(void* pvParams) {
             readPositionFromModbus();
         }
     }
+}
+
+void applyMountCommand(const MountCommand &cmd) {
+    uint8_t result = modbus.ku8MBSuccess;
+
+    switch (cmd.type) {
+        case MountCommandType::STOP:
+            result = writeCommandPulse(CMD_STOP) ? modbus.ku8MBSuccess : 0xFF;
+            if (result == modbus.ku8MBSuccess) telescope.setSlewing(false);
+            break;
+
+        case MountCommandType::SET_TRACKING:
+            result = modbus.writeSingleRegister(REG_TRACKING_ENABLE, cmd.value1);
+            if (result == modbus.ku8MBSuccess) {
+                result = modbus.writeSingleRegister(REG_TRACKING_MODE, cmd.value2);
+            }
+            if (result == modbus.ku8MBSuccess) {
+                result = writeCommandPulse(CMD_SET_TRACKING) ? modbus.ku8MBSuccess : 0xFF;
+            }
+            break;
+
+        case MountCommandType::SET_MOTORS:
+            result = modbus.writeSingleRegister(REG_MOTORS_ENABLE, cmd.value1);
+            if (result == modbus.ku8MBSuccess) {
+                result = writeCommandPulse(CMD_SET_MOTORS) ? modbus.ku8MBSuccess : 0xFF;
+            }
+            break;
+
+        case MountCommandType::JOG_START:
+            result = modbus.writeSingleRegister(REG_JOG_AXIS, cmd.value1);
+            if (result == modbus.ku8MBSuccess) {
+                result = modbus.writeSingleRegister(REG_JOG_DIRECTION, cmd.value2);
+            }
+            if (result == modbus.ku8MBSuccess) {
+                result = modbus.writeSingleRegister(REG_JOG_SPEED, cmd.value3);
+            }
+            if (result == modbus.ku8MBSuccess) {
+                result = writeCommandPulse(CMD_JOG_START) ? modbus.ku8MBSuccess : 0xFF;
+            }
+            break;
+
+        case MountCommandType::JOG_STOP:
+            result = writeCommandPulse(CMD_JOG_STOP) ? modbus.ku8MBSuccess : 0xFF;
+            break;
+
+        case MountCommandType::GOTO:
+        default:
+            return;
+    }
+
+    if (result != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
+        Serial.printf("[Modbus] Errore comando mount: type=%d result=0x%02X\n",
+                      (int)cmd.type,
+                      result);
+    }
+}
+
+bool writeCommandPulse(uint16_t command) {
+    uint8_t resetResult = modbus.writeSingleRegister(REG_COMMAND, CMD_NONE);
+    if (resetResult != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
+        Serial.printf("[Modbus] Errore reset COMMAND: 0x%02X\n", resetResult);
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    uint8_t commandResult = modbus.writeSingleRegister(REG_COMMAND, command);
+    if (commandResult != modbus.ku8MBSuccess) return false;
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+    uint8_t clearResult = modbus.writeSingleRegister(REG_COMMAND, CMD_NONE);
+    return clearResult == modbus.ku8MBSuccess;
 }
 
 // =============================================================================
