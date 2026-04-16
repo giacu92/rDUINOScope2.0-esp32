@@ -1,0 +1,546 @@
+# Porting funzionalita legacy rDUINOScope 2.4.0
+
+Questo documento riassume cosa manca alla repo ESP32-S3 per recuperare le
+funzionalita del firmware legacy in:
+
+`E:\Proj\rDUINOScope\_2.4.0_Leonardo_EQ_giacu92\fw`
+
+Il main legacy e `_2.4.0_Leonardo_EQ_giacu92.ino`. I file studiati sono:
+
+- `_2.4.0_Leonardo_EQ_giacu92.ino`: bootstrap hardware, stato globale, loop principale.
+- `defines.h`: colori, note, stelle di allineamento, costanti orbitali.
+- `functions.ino`: LST/HA, GOTO, tracking, manual move, BMP, opzioni, calibrazioni, batteria.
+- `graphic_screens.ino`: tutte le schermate ILI9488.
+- `touch_inputs.ino`: navigazione touch e azioni UI.
+- `regular_updates.ino`: aggiornamenti tempo, GPS, temperatura, umidita, batteria.
+- `planets_calc.ino`: calcolo Sole, pianeti e Luna.
+
+`BT.ino` non va portato: serviva per la seriale LX200/Stellarium via Bluetooth,
+mentre questa repo ha gia una implementazione WiFi/TCP LX200 e protocollo
+binario Stellarium.
+
+## Stato attuale della repo ESP32
+
+La repo attuale implementa soprattutto il bridge di comunicazione:
+
+- WiFi su ESP32-S3.
+- Server TCP Stellarium su porta `10003`.
+- Autodetect tra protocollo binario Stellarium Desktop e LX200 ASCII.
+- Sincronizzazione NTP.
+- Modbus RTU verso STM32 per inviare target RA/DEC e leggere stato/posizione.
+- LED RGB di stato.
+
+Non sono ancora presenti display grafico, touchscreen, cataloghi locali,
+allineamento, sensori ambientali, GPS/RTC locali, gestione SD, menu utente,
+joystick, buzzer, ventole, night mode e log osservazioni.
+
+## Architettura da raggiungere
+
+La vecchia scheda Arduino/Teensy faceva tutto in un solo firmware: UI, calcoli
+astronomici, stepper e comunicazione. Nella nuova architettura va mantenuta la
+separazione:
+
+- ESP32-S3: UI, touchscreen, cataloghi, SD, GPS/RTC, sensori, opzioni, comandi
+  utente, Stellarium/LX200 WiFi.
+- STM32: pulse generation, accelerazione/decelerazione, tracking deterministico,
+  stato motori, stop, errori, eventuali finecorsa/encoder.
+
+Ogni funzione legacy che muove direttamente i pin step/dir va quindi tradotta in
+un comando o stato condiviso con STM32, non copiata 1:1 sull'ESP32.
+
+## Hardware e periferiche da portare
+
+### Display ILI9488
+
+Il legacy usa un display ILI9488 SPI 480x320, con layout disegnato in coordinate
+portrait 320x480. Sul vecchio codice:
+
+- Arduino Due: `TFT_CS=47`, `TFT_DC=48`, `TFT_RST=46`, libreria `ILI9488_DMA`.
+- Teensy 4.1: `TFT_CS=10`, `TFT_DC=9`, `TFT_RST=23`, libreria `ILI9488_t3`.
+- Rendering basato su primitive Adafruit GFX e `bmpDraw()` da SD.
+- Backlight PWM su `TFTBright=13`.
+- Luminosita salvata in `options.txt`.
+- Timeout spegnimento display: always on, 30 s, 60 s, 2 min, 5 min, 10 min.
+
+Da fare:
+
+- Scegliere libreria ESP32 per ILI9488. Candidati: `TFT_eSPI`, `Arduino_GFX`,
+  oppure driver ILI9488 compatibile Adafruit GFX.
+- Definire pin ESP32-S3 per `TFT_CS`, `TFT_DC`, `TFT_RST`, `SCK`, `MOSI`, `MISO`
+  e backlight PWM.
+- Portare una classe/display service invece di funzioni globali monolitiche.
+- Verificare orientamento 320x480 e rimappare coordinate se necessario.
+- Portare `DrawButton()`, status bar, palette day/night e primitive comuni.
+- Portare `bmpDraw()` o sostituirlo con decoder BMP/JPEG/PNG adatto a ESP32.
+- Ridurre i redraw full-screen dove possibile: ILI9488 a 24 bit/pixel e SPI puo
+  diventare lento.
+
+### Touchscreen AD7873/XPT2046/TSC2046
+
+Il legacy usa `XPT2046_Touchscreen` con:
+
+- `TP_CS=4`
+- `TP_IRQ=2`
+- `myTouch.tirqTouched()`, `myTouch.touched()`, `myTouch.getPoint()`
+- soglia `p.z < 600` per filtrare rumore
+- calibrazione iniziale fissa `tx=(p.x-257)/calx`, `ty=(p.y-445)/caly`
+- procedura completa `calibrateTFT()` a 8 punti
+
+Da fare:
+
+- Scegliere pin ESP32-S3 separando il vecchio `TP_CS=4`, perche nella repo
+  attuale GPIO 4 e gia `RS485_DE_PIN`.
+- Portare driver touch e interrupt IRQ.
+- Portare calibrazione touch, salvataggio parametri e test post-calibrazione.
+- Creare router eventi touch equivalente a `considerTouchInput()`.
+- Gestire wake-up display al primo touch quando il backlight e spento.
+
+### Scheda SD
+
+Il legacy richiede SD per:
+
+- `messier.csv`
+- `treasure.csv`
+- `custom.csv`
+- `options.txt`
+- immagini oggetti in `objects/<OBJECT_NAME>.bmp`
+- mappe stellari `<row>-<col>.bmp`
+- log/report osservazioni, oggi parzialmente dentro flussi legacy/BT
+
+Da fare:
+
+- Decidere se usare SD SPI esterna o SD_MMC su ESP32-S3.
+- Definire pin CS o bus SD_MMC.
+- Portare loader cataloghi con parser robusto CSV, evitando parsing fragile con
+  indici `String` dove possibile.
+- Definire struttura directory sulla SD e documentarla.
+- Portare persistenza opzioni da `options.txt`, oppure migrare a NVS/Preferences
+  mantenendo import/export su SD.
+- Portare asset BMP necessari o convertirli in un formato piu adatto.
+
+### GPS U-Blox NEO
+
+Il legacy usa `TinyGPSPlus` su `Serial2.begin(9600)` e aggiorna:
+
+- latitudine, longitudine, altitudine
+- data/ora
+- timezone ricavata dalla longitudine
+- ora legale/invernale tramite `isSummerTime()`
+- passaggio da schermata GPS a schermata orologio
+
+Da fare:
+
+- Definire UART e pin ESP32-S3 per GPS.
+- Integrare GPS con il modello tempo gia presente, che oggi usa NTP/LX200.
+- Stabilire precedenza sorgenti tempo: NTP, GPS, LX200 manuale, RTC.
+- Portare calcolo timezone e DST, o sostituirlo con una logica timezone piu
+  esplicita/configurabile.
+- Portare schermata GPS con stato satelliti e fallback valori locali.
+
+### RTC DS3231
+
+Il legacy usa DS3231 via I2C:
+
+- Due: SDA/SCL 20/21.
+- Teensy: SDA/SCL 18/19.
+- temperatura RTC usata come test presenza.
+- `rtc.getTimeStr()`, `rtc.getDateStr()`, `rtc.setTime()`, `rtc.setDate()`.
+
+Da fare:
+
+- Definire pin I2C ESP32-S3.
+- Scegliere libreria DS3231 mantenuta per ESP32.
+- Integrare RTC come sorgente/offline backup rispetto a NTP/GPS.
+- Aggiornare RTC quando NTP o GPS sono affidabili.
+- Portare schermata clock e modifica manuale data/ora.
+
+### DHT22 e ambiente
+
+Il legacy usa DHT22 su `DHTPIN=3`, aggiornato circa ogni 30 secondi:
+
+- temperatura
+- umidita
+- visualizzazione su main screen
+- dati inseriti nei log osservazione
+
+Da fare:
+
+- Definire pin ESP32-S3.
+- Portare lettura DHT22 in task/timer non bloccante.
+- Aggiungere stato sensore non disponibile.
+- Collegare valori a UI e log.
+
+### Batteria
+
+Il legacy ha `use_battery_level` e:
+
+- `calculateBatteryLevel()`
+- `drawBatteryLevel()`
+- curva empirica SLA in `functions.ino`
+- icona batteria nella status bar
+
+Da fare:
+
+- Definire ingresso ADC ESP32-S3 e partitore reale.
+- Ricalibrare curva tensione-percentuale per la batteria effettiva.
+- Proteggere l'ADC con scaling corretto.
+- Portare icona batteria e allarmi eventuali.
+
+### Joystick analogico
+
+Il legacy usa:
+
+- `xPin=A1`
+- `yPin=A0`
+- `Joy_SW=A11`
+- calibrazione automatica startup con circa 3 secondi di letture
+- deadband circa `+-100`
+- `consider_Manual_Move()` per muovere RA/DEC
+- microstepping variabile in base alla velocita richiesta
+
+Da fare:
+
+- Definire ingressi ADC ESP32-S3 per joystick.
+- Portare calibrazione startup.
+- Tradurre manual move in comandi verso STM32, non in pulse diretti ESP32.
+- Estendere protocollo Modbus con comandi jog/manual:
+  - asse RA/DEC
+  - direzione
+  - velocita o profilo
+  - start/stop
+  - eventuale microstepping se ancora gestito lato driver/STM32.
+
+### Buzzer/speaker
+
+Il legacy usa `speakerOut` e `SoundOn(note, duration)`:
+
+- conferma boot con melodia.
+- beep su meridian flip.
+- beep su conferme GOTO/allineamento.
+- opzione Sound ON/OFF.
+
+Da fare:
+
+- Definire pin PWM/DAC ESP32-S3.
+- Portare `SoundOn()` usando LEDC/PWM ESP32.
+- Rendere i suoni non bloccanti o comunque brevi.
+- Collegare opzione Sound ON/OFF.
+
+### Ventole e uscite ausiliarie
+
+Il legacy usa:
+
+- `FAN1=37`
+- `FAN2=39`
+- toggle da main menu.
+- FAN1 anche PWM `analogWrite(FAN1, 100)`.
+- stati salvati/caricati in opzioni.
+
+Da fare:
+
+- Definire pin ESP32-S3 per FAN1/FAN2.
+- Decidere se sono GPIO on/off o PWM.
+- Portare controlli UI e persistenza stati.
+- Valutare protezioni hardware se pilotano carichi a 12/13 V.
+
+### Power driver stepper
+
+Il legacy controlla direttamente:
+
+- `POWER_DRV8825=A8`
+- `RA_STP`, `RA_DIR`, `DEC_STP`, `DEC_DIR`
+- pin microstepping `RA_MODE0/1/2`, `DEC_MODE0/1/2`
+- flag `reverse_logic`
+
+Nella nuova architettura questa parte deve stare sullo STM32, non sull'ESP32.
+
+Da fare lato ESP32:
+
+- Esporre solo comandi utente: motors ON/OFF, stop, tracking mode, goto, jog.
+- Estendere Modbus per inoltrare questi comandi allo STM32.
+- Visualizzare stato ricevuto dallo STM32.
+
+Da fare lato STM32:
+
+- Implementare o verificare power enable driver.
+- Implementare modalita tracking sidereal/solar/lunar.
+- Implementare manual jog e stop.
+- Gestire meridian flip se la decisione resta lato motore.
+
+## Schermate grafiche da portare
+
+Il legacy usa `CURRENT_SCREEN` come stato globale:
+
+| ID | Funzione legacy | Scopo |
+| --- | --- | --- |
+| 0 | `drawGPSScreen()` | Stato GPS, coordinate, acquisizione posizione |
+| 1 | `drawClockScreen()` | Data/ora, modifica manuale, passaggio ad allineamento |
+| 3 | `drawSelectAlignment()` | 1-star, iterative align, skip |
+| 4 | `drawMainScreen()` | Dashboard osservazione, oggetto, tempo, LST, ambiente |
+| 5 | `drawCoordinatesScreen()` | Coordinate correnti da posizione motori |
+| 6 | `drawLoadScreen()` | Selezione sorgente oggetti |
+| 7 | `drawOptionsScreen()` | Luminosita, timeout, tracking, meridian flip, suono, motori |
+| 10 | `drawSTATScreen()` | Report sessione osservativa |
+| 11 | `drawStarMap()` | Mappa stellare navigabile tramite BMP |
+| 12 | `drawStarSyncScreen()` | Scelta stella per allineamento |
+| 13 | `drawConstelationScreen()` | Procedura di centratura/allineamento |
+| 14 | `drawTFTCalibrationScreen()` | Calibrazione touch |
+| 15 | `drawConfirmSunTrack()` | Conferma sicurezza tracking Sole |
+
+Da fare:
+
+- Creare un modulo UI con screen enum al posto di interi globali.
+- Portare prima le schermate minime in ordine utile:
+  1. boot/status hardware
+  2. main screen
+  3. options
+  4. load objects
+  5. GPS/clock
+  6. alignment
+  7. coordinates/statistics/star map/calibration
+- Separare rendering e azioni: il legacy mischia draw, stato e logica.
+- Portare `OnScreenMsg()` per messaggi di errore/conferma:
+  - meridian flip
+  - oggetto sotto orizzonte
+  - GOTO completato
+  - errori SD/touch/sensori
+
+## Cataloghi e oggetti
+
+Il legacy gestisce:
+
+- `Messier_Array[112]` da `messier.csv`.
+- `Treasure_Array[130]` da `treasure.csv`.
+- `custom_Array[100]` da `custom.csv`.
+- `Stars[]` in `defines.h` per allineamento.
+- Solar System objects da `ss_planet_names`.
+- descrizione custom aggiunta a fine riga CSV.
+- immagini oggetto da `objects/<nome>.bmp`.
+
+Da fare:
+
+- Definire modello dati comune:
+  - nome
+  - tipo/catalogo
+  - RA
+  - DEC
+  - costellazione
+  - magnitudine
+  - dimensione
+  - descrizione
+  - path immagine opzionale
+- Portare parsing di Messier/Treasure/custom.
+- Spostare `Stars[]` in una struttura dati piu leggibile.
+- Gestire paginazione oggetti come nel legacy:
+  - `MESS_PAGER`
+  - `TREAS_PAGER`
+  - `STARS_PAGER`
+  - `CUSTOM_PAGER`
+- Verificare se "NGC" era solo etichetta UI o se manca un file catalogo non
+  presente nella cartella `fw`.
+
+## Calcoli astronomici
+
+Da portare o consolidare:
+
+- `calculateLST_HA()`: LST, HA, ALT/AZ, visibilita sopra orizzonte.
+- `Current_RA_DEC()`: coordinate correnti derivate dai microstep/posizione.
+- `planet_pos()`: Sole, Mercurio, Venere, Marte, Giove, Saturno, Urano, Nettuno,
+  Plutone, Luna.
+- helper astronomici: `J2000()`, `dayno()`, `frange()`, `fkep()`, `fnatan()`,
+  `FNdegmin()`.
+- gestione oggetto sotto orizzonte: blocco GOTO/tracking se `ALT <= 0`.
+- tracking selezionabile:
+  - `Tracking_type=1`: sidereal/celestial
+  - `Tracking_type=2`: solar
+  - `Tracking_type=0`: lunar
+- conferma esplicita per tracking Sole.
+
+Da fare:
+
+- Evitare duplicazione con `Telescope::getLST_hours()` gia presente.
+- Definire una libreria `Astronomy` testabile su host, senza dipendere da TFT,
+  SD o globali Arduino.
+- Aggiungere test per LST/HA/ALT/AZ e coordinate pianeti su date note.
+- Decidere se aggiornare gli algoritmi lunari, perche il commento legacy dice
+  che l'errore della Luna peggiora col tempo.
+
+## Allineamento e GOTO locale
+
+Il legacy implementa:
+
+- skip alignment.
+- 1-star alignment basato sulla procedura Ralph Pass.
+- iterative alignment.
+- selezione stella, slew, centratura manuale, conferma.
+- correzioni `delta_a_RA` e `delta_a_DEC`.
+- stelle iterative in `Iter_Stars`.
+- uso di `ALLIGN_STEP`, `ALLIGN_TYPE`, `SELECTED_STAR`, `Iterative_Star_Index`.
+
+Da fare:
+
+- Portare workflow UI di allineamento.
+- Isolare matematica allineamento in modulo testabile.
+- Salvare offset allineamento nello stato mount.
+- Applicare offset sia a GOTO locali sia a coordinate correnti mostrate.
+- Definire come sincronizzare offset con STM32:
+  - ESP32 puo correggere target prima di inviarlo.
+  - STM32 puo restare ignorante di RA/DEC corrette.
+  - oppure STM32 riceve offset/stato mount, scelta piu complessa.
+
+## Meridian flip
+
+Il legacy gestisce:
+
+- `MIN_TO_MERIDIAN_FLIP=2`
+- `MIN_SOUND_BEFORE_FLIP=3`
+- `IS_MERIDIAN_FLIP_AUTOMATIC`
+- `IS_POSIBLE_MERIDIAN_FLIP`
+- avviso sonoro prima del flip
+- stop tracking
+- nuovo slew coordinato
+- opzione Auto/OFF
+
+Da fare:
+
+- Decidere proprietario del meridian flip:
+  - ESP32 decide in base a LST/HA e invia nuovo GOTO.
+  - STM32 gestisce safety e meccanica.
+- Estendere Modbus con stato flip/safety se serve.
+- Portare UI opzione Auto/OFF.
+- Portare warning sonoro e messaggi a schermo.
+- Aggiungere blocchi di sicurezza contro flip durante manual move o GOTO gia in
+  corso.
+
+## Opzioni persistenti
+
+Il legacy salva in `options.txt`:
+
+- `TFT_Brightness`
+- `TFT_Time`
+- `Tracking_type`
+- `IS_MERIDIAN_FLIP_AUTOMATIC`
+- `Fan1_State`
+- `Fan2_State`
+- `Sound_State`
+- `Stepper_State`
+
+Da fare:
+
+- Portare schema opzioni.
+- Scegliere backend: SD `options.txt`, ESP32 Preferences/NVS, o entrambi.
+- Gestire defaults robusti se il file manca o e corrotto.
+- Aggiornare UI appena si modifica un'opzione.
+
+## Sessione osservativa e statistiche
+
+Il legacy mantiene `ObservedObjects[50]`:
+
+- nome oggetto
+- dettagli
+- ora inizio osservazione
+- temperatura/umidita
+- HA
+- altitudine
+- durata osservazione
+
+Da fare:
+
+- Portare `UpdateObservedObjects()`.
+- Portare `drawSTATScreen()`.
+- Aggiungere export report su SD, esclusa la parte BT.
+- Gestire limite 50 oggetti o renderlo configurabile.
+- Decidere formato report: testo legacy, CSV o JSON.
+
+## Protocollo ESP32-STM32 da estendere
+
+La mappa Modbus attuale copre:
+
+- target RA/DEC
+- comando GOTO/STOP base
+- stato
+- posizione corrente
+- error code
+
+Per portare la ciccia serve aggiungere comandi/register per:
+
+- tracking ON/OFF.
+- tracking mode sidereal/solar/lunar.
+- manual jog RA/DEC con direzione e velocita.
+- motors power ON/OFF.
+- meridian flip request/status.
+- sync/allineamento o set current coordinate.
+- stato oggetto raggiunto, errore meccanico, driver disabled.
+- eventuali finecorsa/encoder/hard stop se gestiti dallo STM32.
+
+## Milestone consigliate
+
+### Milestone 1: base display e touch
+
+- Aggiungere librerie display/touch a `platformio.ini`.
+- Definire pin in `config.h`.
+- Mostrare boot screen e main screen statico.
+- Leggere touch e navigare tra main/options.
+- Backlight PWM e timeout.
+
+### Milestone 2: storage e cataloghi
+
+- Inizializzare SD.
+- Caricare `messier.csv`, `treasure.csv`, `custom.csv`.
+- Mostrare load screen e dettagli oggetto.
+- Disegnare BMP oggetto se presente.
+
+### Milestone 3: astronomia locale
+
+- Portare LST/HA/ALT/AZ.
+- Portare pianeti e Luna.
+- Portare visibilita sopra orizzonte.
+- Collegare scelta oggetto a GOTO gia esistente via Modbus.
+
+### Milestone 4: sensori e tempo
+
+- Portare RTC DS3231.
+- Portare GPS TinyGPSPlus.
+- Portare DHT22.
+- Portare batteria.
+- Definire priorita NTP/GPS/RTC/LX200.
+
+### Milestone 5: controllo mount avanzato
+
+- Estendere Modbus per tracking mode, stop, motors on/off, manual jog.
+- Portare joystick.
+- Portare opzioni motori/tracking.
+- Portare meridian flip.
+
+### Milestone 6: allineamento e sessioni
+
+- Portare stelle allineamento.
+- Portare 1-star e iterative alignment.
+- Portare statistiche e log osservazioni.
+- Portare star map BMP navigabile.
+- Portare calibrazione touch completa.
+
+## Dipendenze PlatformIO previste
+
+Da valutare e aggiungere in modo incrementale:
+
+- Driver ILI9488 per ESP32-S3: `TFT_eSPI` o `Arduino_GFX`.
+- `XPT2046_Touchscreen`.
+- `TinyGPSPlus`.
+- Libreria DS3231/RTClib compatibile ESP32.
+- Libreria DHT.
+- Driver SD/SdFat se serve piu controllo del filesystem.
+
+## Note importanti dal legacy
+
+- Il codice legacy contiene molto stato globale e side effect tra schermate,
+  touch e motori. Conviene portare per moduli, non fare copia/incolla massivo.
+- Alcuni nomi hanno typo storici (`ALLIGN`, `cosiderSlewTo`) e si possono
+  correggere nella nuova architettura.
+- Molte funzioni legacy bloccano con `delay()`, loop touch o attese SD; su ESP32
+  con WiFi conviene usare task/timer o blocchi molto brevi.
+- Il vecchio firmware usa `String` estesamente; su ESP32 e meglio limitare
+  frammentazione heap per cataloghi e parser.
+- La parte BT va ignorata, ma alcune funzioni richiamate anche da touch/UI
+  devono restare: selezione oggetto, osservazioni, GOTO, tracking, suoni.
+
