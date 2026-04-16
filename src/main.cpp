@@ -135,7 +135,7 @@ void    postTransmission();
 void    modbusTask(void* pvParams);
 void    readPositionFromModbus();
 void    applyMountCommand(const MountCommand &cmd);
-bool    writeCommandPulse(uint16_t command);
+bool    writeCommandRequest(uint16_t command);
 double  raDeltaHours(double a, double b);
 bool    currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100);
 
@@ -932,12 +932,6 @@ void modbusTask(void* pvParams) {
             uint16_t dec_high = (uint16_t)((cmd.dec_arcsec100 >> 16) & 0xFFFF);
             uint16_t dec_low  = (uint16_t)( cmd.dec_arcsec100        & 0xFFFF);
 
-            uint8_t resetResult = modbus.writeSingleRegister(REG_REQ_COMMAND, CMD_NONE);
-            if (resetResult != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
-                Serial.printf("[Modbus] Errore reset COMMAND prima del GOTO: 0x%02X\n", resetResult);
-            }
-            vTaskDelay(pdMS_TO_TICKS(20));
-
             modbus.setTransmitBuffer(0, ra_high);
             modbus.setTransmitBuffer(1, ra_low);
             modbus.setTransmitBuffer(2, dec_high);
@@ -954,12 +948,18 @@ void modbusTask(void* pvParams) {
                 continue;
             }
 
+            uint8_t pendingResult = modbus.writeSingleRegister(REG_REQ_COMMAND_PENDING, 1);
+            if (pendingResult != modbus.ku8MBSuccess) {
+                if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore pending GOTO: 0x%02X\n", pendingResult); }
+                telescope.setSlewing(false);
+                continue;
+            }
+
             // Polling status STM32 fino a TRACKING (done) o ERROR o timeout
             // Ogni iterazione legge davvero i registri Modbus e aggiorna telescope
             const int MAX_POLL = 3000;   // max ~30 secondi (100 ms * 300)
             bool gotoFinished = false;
             bool sawSlewing = false;
-            bool commandCleared = false;
             bool warnedTrackingWithoutSlewing = false;
             for (int i = 0; i < MAX_POLL; i++) {
                 esp_task_wdt_reset();
@@ -969,18 +969,6 @@ void modbusTask(void* pvParams) {
 
                 if (telescope.status == State::SLEWING) {
                     sawSlewing = true;
-
-                    // COMMAND e' proprieta' di ESP32: dopo che STM32 ha
-                    // osservato la richiesta, ESP32 lo riporta a IDLE.
-                    if (!commandCleared) {
-                        uint8_t clearResult = modbus.writeSingleRegister(REG_REQ_COMMAND, CMD_NONE);
-                        if (clearResult == modbus.ku8MBSuccess) {
-                            commandCleared = true;
-                            if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] COMMAND = IDLE."); }
-                        } else if (DEBUG_LX200_MODBUS) {
-                            Serial.printf("[Modbus] Error: unable to clear COMMAND. result=0x%02X\n", clearResult);
-                        }
-                    }
                 } else if (telescope.status == State::TRACKING) {
                     if (sawSlewing || currentPositionMatchesTarget(cmd.ra_arcsec100, cmd.dec_arcsec100)) {
                         if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
@@ -1011,7 +999,6 @@ void modbusTask(void* pvParams) {
 
             if (!gotoFinished) {
                 if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] Timeout polling STM32."); }
-                modbus.writeSingleRegister(REG_REQ_COMMAND, CMD_NONE);
                 telescope.setSlewing(false);
             }
             lastPosRead = millis();   // evita doppia lettura immediata a fine GOTO
@@ -1030,7 +1017,7 @@ void applyMountCommand(const MountCommand &cmd) {
 
     switch (cmd.type) {
         case MountCommandType::STOP:
-            result = writeCommandPulse(CMD_STOP) ? modbus.ku8MBSuccess : 0xFF;
+            result = writeCommandRequest(CMD_STOP) ? modbus.ku8MBSuccess : 0xFF;
             if (result == modbus.ku8MBSuccess) telescope.setSlewing(false);
             break;
 
@@ -1040,14 +1027,14 @@ void applyMountCommand(const MountCommand &cmd) {
                 result = modbus.writeSingleRegister(REG_REQ_TRACKING_MODE, cmd.value2);
             }
             if (result == modbus.ku8MBSuccess) {
-                result = writeCommandPulse(CMD_SET_TRACKING) ? modbus.ku8MBSuccess : 0xFF;
+                result = writeCommandRequest(CMD_SET_TRACKING) ? modbus.ku8MBSuccess : 0xFF;
             }
             break;
 
         case MountCommandType::SET_MOTORS:
             result = modbus.writeSingleRegister(REG_REQ_MOTORS_ENABLE, cmd.value1);
             if (result == modbus.ku8MBSuccess) {
-                result = writeCommandPulse(CMD_SET_MOTORS) ? modbus.ku8MBSuccess : 0xFF;
+                result = writeCommandRequest(CMD_SET_MOTORS) ? modbus.ku8MBSuccess : 0xFF;
             }
             break;
 
@@ -1060,12 +1047,12 @@ void applyMountCommand(const MountCommand &cmd) {
                 result = modbus.writeSingleRegister(REG_REQ_JOG_SPEED, cmd.value3);
             }
             if (result == modbus.ku8MBSuccess) {
-                result = writeCommandPulse(CMD_JOG_START) ? modbus.ku8MBSuccess : 0xFF;
+                result = writeCommandRequest(CMD_JOG_START) ? modbus.ku8MBSuccess : 0xFF;
             }
             break;
 
         case MountCommandType::JOG_STOP:
-            result = writeCommandPulse(CMD_JOG_STOP) ? modbus.ku8MBSuccess : 0xFF;
+            result = writeCommandRequest(CMD_JOG_STOP) ? modbus.ku8MBSuccess : 0xFF;
             break;
 
         case MountCommandType::GOTO:
@@ -1080,23 +1067,17 @@ void applyMountCommand(const MountCommand &cmd) {
     }
 }
 
-bool writeCommandPulse(uint16_t command) {
-    uint8_t resetResult = modbus.writeSingleRegister(REG_REQ_COMMAND, CMD_NONE);
-    if (resetResult != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
-        Serial.printf("[Modbus] Errore reset COMMAND: 0x%02X\n", resetResult);
-    }
-    vTaskDelay(pdMS_TO_TICKS(10));
-
+bool writeCommandRequest(uint16_t command) {
     uint8_t commandResult = modbus.writeSingleRegister(REG_REQ_COMMAND, command);
     if (commandResult != modbus.ku8MBSuccess) return false;
 
-    if (DEBUG_LX200_MODBUS) {
-        Serial.printf("[Modbus] COMMAND = %u.\n", command);
-    }
+    uint8_t pendingResult = modbus.writeSingleRegister(REG_REQ_COMMAND_PENDING, 1);
+    if (pendingResult != modbus.ku8MBSuccess) return false;
 
-    vTaskDelay(pdMS_TO_TICKS(10));
-    uint8_t clearResult = modbus.writeSingleRegister(REG_REQ_COMMAND, CMD_NONE);
-    return clearResult == modbus.ku8MBSuccess;
+    if (DEBUG_LX200_MODBUS) {
+        Serial.printf("[Modbus] COMMAND request = %u.\n", command);
+    }
+    return true;
 }
 
 // =============================================================================

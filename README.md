@@ -106,8 +106,8 @@ RA  = hours * 15 * 3600 * 100
 DEC = degrees * 3600 * 100
 ```
 
-Those signed 32-bit values are split across two 16-bit request registers each
-and sent to the STM32 together with `REG_REQ_COMMAND=1`.
+Those signed 32-bit values are split across two 16-bit request registers each.
+The ESP32 writes `REG_REQ_COMMAND=1`, then sets `REG_REQ_COMMAND_PENDING=1`.
 
 The STM32 owns the actual movement. It performs acceleration, deceleration,
 tracking transition, and error handling. The ESP32 polls the STM32 status and
@@ -116,10 +116,11 @@ position registers, then reports the current position back to Stellarium.
 Milestone 0 extends the same boundary with high-level mount controls for the
 future local UI: tracking enable/mode, motors enable/disable, and manual jog.
 The ESP32 still does not generate motor pulses; it only writes intent into
-Modbus registers. Registers named `REG_REQ_*` are Modbus Master-owned requests;
-registers named `REG_RES_*` are Modbus Slave-owned responses. STM32 observes
-`REG_REQ_COMMAND` and acts on changes, but it does not write or clear request
-registers.
+Modbus registers. Registers named `REG_REQ_*` are Modbus Master-side requests;
+registers named `REG_RES_*` are Modbus Slave-side responses. The one deliberate
+exception is `REG_REQ_COMMAND_PENDING`: ESP32 sets it to `1` after writing a
+command, and STM32 clears that pending flag back to `0` after consuming the
+command.
 
 The STM32 firmware already defines `CMD_SYNC=3` and `CMD_FOLLOW_TARGET=4`; the
 ESP32 keeps those values reserved. Manual jog intentionally uses dedicated
@@ -150,6 +151,7 @@ The ESP32 and STM32 share this compact register map:
 | 14 | `REG_REQ_JOG_AXIS` | Write | `0` RA, `1` DEC |
 | 15 | `REG_REQ_JOG_DIRECTION` | Write | `0` negative/west/south, `1` positive/east/north |
 | 16 | `REG_REQ_JOG_SPEED` | Write | STM32-defined jog speed/profile |
+| 17 | `REG_REQ_COMMAND_PENDING` | Write/consume | ESP32 sets to `1`; STM32 clears to `0` after consuming `REG_REQ_COMMAND` |
 
 Command values written to `REG_REQ_COMMAND`:
 
@@ -164,6 +166,10 @@ Command values written to `REG_REQ_COMMAND`:
 | 6 | `CMD_SET_MOTORS` |
 | 7 | `CMD_JOG_START` |
 | 8 | `CMD_JOG_STOP` |
+
+`REG_REQ_COMMAND` may remain at the last requested command. A new command is
+signaled by setting `REG_REQ_COMMAND_PENDING=1`, so repeated identical commands
+do not depend on short timed pulses.
 
 `CMD_JOG_START` reads `REG_REQ_JOG_AXIS`, `REG_REQ_JOG_DIRECTION`, and
 `REG_REQ_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested

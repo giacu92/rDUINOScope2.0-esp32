@@ -62,6 +62,11 @@ const long STEPS_PER_REV = (long)GEAR_TEETH * MOTOR_STEPS * MICROSTEPPING;
 #define REG_REQ_JOG_DIRECTION    15  // 0=negative/west/south, 1=positive/east/north
 #define REG_REQ_JOG_SPEED        16  // implementation-defined speed/profile
 
+// Handshake bit:
+//  - ESP32 sets this to 1 after writing REG_REQ_COMMAND;
+//  - STM32 clears it to 0 after copying the command.
+#define REG_REQ_COMMAND_PENDING  17  // 1=new command pending; STM32 clears to 0 after consuming
+
 #define CMD_NONE             0
 #define CMD_GOTO             1
 #define CMD_STOP             2
