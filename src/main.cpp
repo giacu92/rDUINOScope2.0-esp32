@@ -75,7 +75,7 @@ static uint8_t binBuf[64];
 static int     binIdx = 0;
 
 // Coda FreeRTOS per i comandi GOTO verso STM32  FIX [9]
-struct GotoCmd { long ra_steps; long dec_steps; };
+struct GotoCmd { int32_t ra_steps; int32_t dec_steps; };
 QueueHandle_t gotoQueue;
 
 unsigned long lastStelUpdate = 0;
@@ -112,7 +112,7 @@ void    postTransmission();
 void    modbusTask(void* pvParams);
 void    readPositionFromModbus();
 double  raDeltaHours(double a, double b);
-bool    currentPositionMatchesTarget(long targetRaArcsec100, long targetDecArcsec100);
+bool    currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100);
 
 // =============================================================================
 //  SETUP
@@ -156,7 +156,7 @@ double raDeltaHours(double a, double b) {
     return delta;
 }
 
-bool currentPositionMatchesTarget(long targetRaArcsec100, long targetDecArcsec100) {
+bool currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100) {
     const double RA_TOL_H    = 0.001111;  // circa 1 arcmin in RA
     const double DEC_TOL_DEG = 0.016667;  // circa 1 arcmin
 
@@ -650,8 +650,8 @@ void processLX200Command(const String &cmd) {
         telescope.setSlewing(false);
         // Invia comando STOP a STM32 tramite coda (non bloccante)
         GotoCmd stopCmd = {0, 0};
-        // Usiamo ra_steps == LONG_MIN come segnale "STOP" nel task Modbus
-        stopCmd.ra_steps = LONG_MIN;
+        // Usiamo ra_steps == INT32_MIN come segnale "STOP" nel task Modbus
+        stopCmd.ra_steps = INT32_MIN;
         xQueueSend(gotoQueue, &stopCmd, 0);
     }
 
@@ -747,12 +747,12 @@ bool executeGoto() {
     // Converte RA (ore) → arcsec*100  e  DEC (gradi) → arcsec*100
     // Lo STM32 riceve coordinate assolute in arcsec*100 e le converte in
     // passi motore internamente (inclusa la conversione RA→HA con il suo clock)
-    long ra_arcsec100  = (long)(targetRA_h    * 15.0 * 3600.0 * 100.0);
-    long dec_arcsec100 = (long)(targetDEC_deg *        3600.0 * 100.0);
+    int32_t ra_arcsec100  = (int32_t)(targetRA_h    * 15.0 * 3600.0 * 100.0);
+    int32_t dec_arcsec100 = (int32_t)(targetDEC_deg *        3600.0 * 100.0);
 
     if (DEBUG_LX200_MODBUS) {
         Serial.printf("[GOTO] RA=%.4fh DEC=%.4f deg -> RA_arcsec100=%ld DEC_arcsec100=%ld\n",
-                      targetRA_h, targetDEC_deg, ra_arcsec100, dec_arcsec100);
+                      targetRA_h, targetDEC_deg, (long)ra_arcsec100, (long)dec_arcsec100);
     }
 
     telescope.setSlewing(true);
@@ -809,8 +809,8 @@ void modbusTask(void* pvParams) {
         GotoCmd cmd;
         if (xQueueReceive(gotoQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE) {
 
-            // Segnale STOP (RA == LONG_MIN)
-            if (cmd.ra_steps == LONG_MIN) {
+            // Segnale STOP (RA == INT32_MIN)
+            if (cmd.ra_steps == INT32_MIN) {
                 modbus.setTransmitBuffer(0, 0);
                 modbus.setTransmitBuffer(1, 0);
                 modbus.setTransmitBuffer(2, 0);

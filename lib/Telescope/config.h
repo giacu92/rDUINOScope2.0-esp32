@@ -44,7 +44,7 @@ const long STEPS_PER_REV = (long)GEAR_TEETH * MOTOR_STEPS * MICROSTEPPING;
 #define REG_DEC_HIGH    2
 #define REG_DEC_LOW     3
 #define REG_COMMAND     4
-#define REG_STATUS      5   // 0=idle, 1=moving, 2=done, 3=error
+#define REG_STATUS      5   // 0=idle, 1=slewing, 2=tracking, 3=error
 #define REG_CURRENT_RA_HIGH  6
 #define REG_CURRENT_RA_LOW   7
 #define REG_CURRENT_DEC_HIGH 8
