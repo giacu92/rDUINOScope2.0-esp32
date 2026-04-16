@@ -1,0 +1,215 @@
+# rDUINOScope 2.0 - ESP32-S3 Interface Firmware
+
+This repository contains the ESP32-S3 side of the rDUINOScope 2.0 controller.
+The full system is split across two MCUs: the ESP32-S3 handles WiFi,
+Stellarium connectivity, LX200 compatibility, time synchronization, and user
+facing status; the STM32F401 runs the time-critical motor control loop.
+
+The split is intentional. WiFi and TCP traffic can introduce latency and task
+scheduling jitter, while stepper pulse generation needs deterministic timing.
+The ESP32 therefore acts as the network-facing master and exchanges compact
+position and command data with the STM32 over Modbus RTU.
+
+## Main Responsibilities
+
+The firmware exposes a TCP telescope server on port `10003` for Stellarium and
+compatible clients. It supports both Stellarium Desktop and Stellarium Mobile on
+the same port:
+
+- Stellarium Desktop uses the native binary telescope protocol.
+- Stellarium Mobile and similar clients use LX200-style ASCII commands over TCP.
+
+The protocol is detected automatically from the first received byte of a new TCP
+session. Binary packets are treated as Stellarium Desktop traffic; text commands
+are handled by the LX200 parser.
+
+The ESP32 also keeps local telescope state for the client-facing protocol layer:
+current RA/DEC, target RA/DEC, site coordinates, LX200 date/time, and slewing
+state. Actual motor movement and tracking are delegated to the STM32.
+
+## Hardware Target
+
+The current PlatformIO environment targets:
+
+```ini
+board = esp32-s3-devkitc-1
+framework = arduino
+```
+
+The expected board is an ESP32-S3 DevKitC-1 style module with an onboard
+WS2812/NeoPixel RGB LED on GPIO 48.
+
+Important ESP32 pin assignments are defined in `lib/Telescope/config.h`:
+
+| Function | GPIO | Notes |
+| :-- | :-- | :-- |
+| Modbus TX | 17 | ESP32 UART TX toward STM32/RS485 side |
+| Modbus RX | 16 | ESP32 UART RX from STM32/RS485 side |
+| RS485 DE | 4 | Driver enable, active HIGH |
+| RGB LED | 48 | Onboard WS2812/NeoPixel status LED |
+
+Modbus runs on `Serial2` at `57600` baud, using slave ID `1` on the STM32 side.
+
+## WiFi and Time
+
+WiFi credentials are read from `lib/Telescope/secrets.h` through the `Secrets`
+helper class. Keep real credentials local and avoid committing personal network
+details to a shared repository.
+
+After WiFi connects, the firmware synchronizes time through NTP:
+
+```cpp
+const char* NTP_SERVER = "pool.ntp.org";
+const long  GMT_OFFSET_SEC = 3600;
+const int   DAYLIGHT_OFFSET_SEC = 3600;
+```
+
+The LX200 time model can also be updated by clients through date/time commands.
+When a client manually sets date or time, the firmware avoids overwriting it
+immediately with NTP-derived time.
+
+## Status LED
+
+The onboard RGB LED is handled by a low-priority FreeRTOS task, separate from
+the main TCP loop. It currently reports WiFi state:
+
+| Color | Meaning |
+| :-- | :-- |
+| Red | WiFi disconnected or connecting |
+| Blue | WiFi connected |
+| Purple breathing at 0.25 Hz | Stellarium client connected |
+| Yellow | Reserved for future captive portal mode |
+
+Brightness is intentionally low:
+
+```cpp
+constexpr uint8_t RGB_LED_BRIGHTNESS = 16;  // about 6%
+```
+
+When captive portal support is added, it can switch the indicator with:
+
+```cpp
+setWifiLedState(WIFI_LED_CAPTIVE_PORTAL);
+```
+
+## Stellarium Command Flow
+
+For a GOTO request, the ESP32 receives a target from either protocol path:
+
+- `:Sr` and `:Sd` followed by `:MS#` from LX200 clients.
+- A 20-byte binary GOTO packet from Stellarium Desktop.
+
+The target is converted to the shared Modbus coordinate format:
+
+```text
+RA  = hours * 15 * 3600 * 100
+DEC = degrees * 3600 * 100
+```
+
+Those signed 32-bit values are split across two 16-bit registers each and sent
+to the STM32 together with `COMMAND=1`.
+
+The STM32 owns the actual movement. It performs acceleration, deceleration,
+tracking transition, and error handling. The ESP32 polls the STM32 status and
+position registers, then reports the current position back to Stellarium.
+
+## Modbus Register Boundary
+
+The ESP32 and STM32 share this compact register map:
+
+| Register | Name | Direction from ESP32 view | Meaning |
+| :-- | :-- | :-- | :-- |
+| 0 | `REG_RA_HIGH` | Write | Target RA high word |
+| 1 | `REG_RA_LOW` | Write | Target RA low word |
+| 2 | `REG_DEC_HIGH` | Write | Target DEC high word |
+| 3 | `REG_DEC_LOW` | Write | Target DEC low word |
+| 4 | `REG_COMMAND` | Write | `1` GOTO, `2` STOP |
+| 5 | `REG_STATUS` | Read | STM32 state |
+| 6 | `REG_CURRENT_RA_HIGH` | Read | Current RA high word |
+| 7 | `REG_CURRENT_RA_LOW` | Read | Current RA low word |
+| 8 | `REG_CURRENT_DEC_HIGH` | Read | Current DEC high word |
+| 9 | `REG_CURRENT_DEC_LOW` | Read | Current DEC low word |
+| 10 | `REG_ERROR_CODE` | Read | STM32 error code |
+
+State values mirror the STM32 firmware:
+
+| Value | State |
+| :-- | :-- |
+| 0 | `IDLE` |
+| 1 | `SLEWING` |
+| 2 | `TRACKING` |
+| 3 | `ERROR` |
+
+## FreeRTOS Layout
+
+The firmware keeps blocking or slower work away from the main TCP loop:
+
+- `loop()` handles Stellarium TCP traffic and periodic position packets.
+- `modbusTask` runs on core 1 and owns all Modbus communication.
+- `statusLedTask` runs at low priority and updates the RGB LED once per second.
+
+GOTO commands are passed to the Modbus task through a FreeRTOS queue. This keeps
+the network path responsive while the STM32 is being polled for motion status.
+
+## Configuration Points
+
+Most project-level constants are in `lib/Telescope/config.h`:
+
+- WiFi credential access
+- Debug flags
+- Site latitude and longitude
+- Stellarium TCP port and update interval
+- NTP server and timezone offsets
+- Modbus baud rate, slave ID, and ESP32 pins
+- Onboard RGB LED pin and brightness
+
+PlatformIO board and build options are in `platformio.ini`.
+
+## Build and Upload
+
+Build the firmware with PlatformIO:
+
+```bash
+pio run
+```
+
+Upload to the ESP32-S3:
+
+```bash
+pio run -t upload
+```
+
+Open the serial monitor at `115200` baud:
+
+```bash
+pio device monitor
+```
+
+The configured upload speed is `921600`.
+
+## Dependencies
+
+The project uses:
+
+- `4-20ma/ModbusMaster` for Modbus RTU master communication.
+- `adafruit/Adafruit NeoPixel` for the onboard WS2812 status LED.
+- Arduino ESP32 `WiFi` and time APIs.
+
+Dependencies are declared in `platformio.ini`.
+
+## Current Limitations
+
+Captive portal provisioning is planned but not implemented yet. The yellow LED
+state is already reserved for that mode.
+
+The ESP32 currently assumes the STM32 register map and coordinate format used by
+the matching rDUINOScope 2.0 STM32 firmware. If the STM32 register layout
+changes, the constants in `config.h` and the Modbus packing code must be kept in
+sync.
+
+## Related Firmware
+
+This firmware is designed to work with the rDUINOScope 2.0 STM32F401 motor
+control firmware. The STM32 project documents the motor loop, driver handling,
+encoder support, hard stop behavior, and detailed Modbus slave implementation.
+This repository intentionally focuses on the ESP32 network and protocol side.

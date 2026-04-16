@@ -62,3 +62,8 @@ const long STEPS_PER_REV = (long)GEAR_TEETH * MOTOR_STEPS * MICROSTEPPING;
 constexpr uint8_t MODBUS_TX_PIN = 17;
 constexpr uint8_t MODBUS_RX_PIN = 16;
 constexpr uint8_t RS485_DE_PIN  = 4;
+
+// ESP32-S3 DevKitC-1 onboard RGB LED (WS2812/NeoPixel)
+constexpr uint8_t RGB_LED_PIN        = 48;
+constexpr uint8_t RGB_LED_COUNT      = 1;
+constexpr uint8_t RGB_LED_BRIGHTNESS = 16;  // ~6% of 255

@@ -25,9 +25,11 @@
 // =============================================================================
 
 #include <WiFi.h>
+#include <math.h>
 #include <time.h>
 #include <esp_task_wdt.h>
 #include <ModbusMaster.h>
+#include <Adafruit_NeoPixel.h>
 #include "telescope.h"
 #include "config.h"
 
@@ -38,6 +40,7 @@
 WiFiServer  tcpServer(STEL_PORT);
 WiFiClient  stelClient;
 ModbusMaster modbus;
+Adafruit_NeoPixel statusLed(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 Telescope telescope(LATITUDE_DEG, LONGITUDE_DEG);
 
@@ -77,10 +80,25 @@ QueueHandle_t gotoQueue;
 
 unsigned long lastStelUpdate = 0;
 
+enum WifiLedState {
+    WIFI_LED_DISCONNECTED,
+    WIFI_LED_CONNECTED,
+    WIFI_LED_STELLARIUM_CONNECTED,
+    WIFI_LED_CAPTIVE_PORTAL
+};
+
+WifiLedState wifiLedState = WIFI_LED_DISCONNECTED;
+bool statusLedHasRendered = false;
+
 // -----------------------------------------------------------------------------
 // Prototipi
 // -----------------------------------------------------------------------------
 void    connectWiFi();
+void    initStatusLed();
+void    setWifiLedState(WifiLedState state);
+void    renderStellariumConnectedLed();
+void    updateWifiLedFromStatus();
+void    statusLedTask(void* pvParams);
 void    syncNTP();
 double  calcLST();
 void    handleStellarium();
@@ -103,6 +121,8 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.println("\n=== Stellarium GOTO Bridge – ESP32 rev2 ===");
+
+    initStatusLed();
 
     pinMode(RS485_DE_PIN, OUTPUT);
     digitalWrite(RS485_DE_PIN, LOW);
@@ -182,10 +202,86 @@ void loop() {
 // =============================================================================
 //  WiFi
 // =============================================================================
+void initStatusLed() {
+    statusLed.begin();
+    statusLed.setBrightness(RGB_LED_BRIGHTNESS);
+    setWifiLedState(WIFI_LED_DISCONNECTED);
+    xTaskCreatePinnedToCore(statusLedTask, "status_led", 2048, nullptr, 0, nullptr, 0);
+}
+
+void setWifiLedState(WifiLedState state) {
+    if (wifiLedState == state && statusLedHasRendered) return;
+
+    wifiLedState = state;
+
+    uint32_t color = 0;
+    switch (state) {
+        case WIFI_LED_CONNECTED:
+            color = statusLed.Color(0, 0, 255);      // blue
+            break;
+        case WIFI_LED_STELLARIUM_CONNECTED:
+            renderStellariumConnectedLed();
+            statusLedHasRendered = true;
+            return;
+        case WIFI_LED_CAPTIVE_PORTAL:
+            color = statusLed.Color(255, 180, 0);    // yellow
+            break;
+        case WIFI_LED_DISCONNECTED:
+        default:
+            color = statusLed.Color(255, 0, 0);      // red
+            break;
+    }
+
+    statusLed.setPixelColor(0, color);
+    statusLed.show();
+    statusLedHasRendered = true;
+}
+
+void renderStellariumConnectedLed() {
+    constexpr uint32_t BREATH_PERIOD_MS = 4000;  // 0.25 Hz
+    constexpr float BREATH_TWO_PI = 6.28318530718f;
+    constexpr uint8_t MIN_LEVEL = 32;
+    constexpr uint8_t MAX_LEVEL = 255;
+
+    uint32_t phase = millis() % BREATH_PERIOD_MS;
+    float breath = (1.0f - cosf((float)phase * BREATH_TWO_PI / BREATH_PERIOD_MS)) * 0.5f;
+    uint8_t level = MIN_LEVEL + (uint8_t)((MAX_LEVEL - MIN_LEVEL) * breath);
+
+    statusLed.setPixelColor(0, statusLed.Color(level / 2, 0, level));
+    statusLed.show();
+}
+
+void updateWifiLedFromStatus() {
+    // Keep yellow reserved for the future captive portal implementation.
+    if (wifiLedState == WIFI_LED_CAPTIVE_PORTAL) return;
+
+    if (WiFi.status() != WL_CONNECTED) {
+        setWifiLedState(WIFI_LED_DISCONNECTED);
+    } else if (stelClient && stelClient.connected()) {
+        setWifiLedState(WIFI_LED_STELLARIUM_CONNECTED);
+    } else {
+        setWifiLedState(WIFI_LED_CONNECTED);
+    }
+}
+
+void statusLedTask(void* pvParams) {
+    (void)pvParams;
+
+    for (;;) {
+        updateWifiLedFromStatus();
+        if (wifiLedState == WIFI_LED_STELLARIUM_CONNECTED) {
+            renderStellariumConnectedLed();
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 void connectWiFi() {
+    setWifiLedState(WIFI_LED_DISCONNECTED);
     Serial.printf("Connessione a: %s", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+    setWifiLedState(WIFI_LED_CONNECTED);
     Serial.printf("\nConnesso! IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
