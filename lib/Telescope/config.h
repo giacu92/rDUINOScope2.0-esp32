@@ -66,6 +66,7 @@ const long STEPS_PER_REV = (long)GEAR_TEETH * MOTOR_STEPS * MICROSTEPPING;
 //  - ESP32 sets this to 1 after writing REG_REQ_COMMAND;
 //  - STM32 clears it to 0 after copying the command.
 #define REG_REQ_COMMAND_PENDING  17  // 1=new command pending; STM32 clears to 0 after consuming
+#define REG_RES_STM32_FW_VERSION 18  // STM32 firmware version, packed as 0xMMmm
 
 #define CMD_NONE             0
 #define CMD_GOTO             1

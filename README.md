@@ -152,6 +152,7 @@ The ESP32 and STM32 share this compact register map:
 | 15 | `REG_REQ_JOG_DIRECTION` | Write | `0` negative/west/south, `1` positive/east/north |
 | 16 | `REG_REQ_JOG_SPEED` | Write | STM32-defined jog speed/profile |
 | 17 | `REG_REQ_COMMAND_PENDING` | Write/consume | ESP32 sets to `1`; STM32 clears to `0` after consuming `REG_REQ_COMMAND` |
+| 18 | `REG_RES_STM32_FW_VERSION` | Read | STM32 firmware version, packed as `0xMMmm` |
 
 Command values written to `REG_REQ_COMMAND`:
 
@@ -170,6 +171,10 @@ Command values written to `REG_REQ_COMMAND`:
 `REG_REQ_COMMAND` may remain at the last requested command. A new command is
 signaled by setting `REG_REQ_COMMAND_PENDING=1`, so repeated identical commands
 do not depend on short timed pulses.
+
+`REG_RES_STM32_FW_VERSION` stores the STM32 firmware version as `0xMMmm`, where
+the high byte is the major version and the low byte is the minor version. For
+example, `0x0200` means `2.0`.
 
 `CMD_JOG_START` reads `REG_REQ_JOG_AXIS`, `REG_REQ_JOG_DIRECTION`, and
 `REG_REQ_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested

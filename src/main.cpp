@@ -134,6 +134,7 @@ void    preTransmission();
 void    postTransmission();
 void    modbusTask(void* pvParams);
 void    readPositionFromModbus();
+void    readSTM32FirmwareVersion();
 void    applyMountCommand(const MountCommand &cmd);
 bool    writeCommandRequest(uint16_t command);
 double  raDeltaHours(double a, double b);
@@ -168,6 +169,7 @@ void setup() {
     if (getLocalTime(&timeinfo)) {
         telescope.setLX200Date(timeinfo);
     }
+    readSTM32FirmwareVersion();
 
     tcpServer.begin();
     tcpServer.setNoDelay(true);
@@ -1108,6 +1110,18 @@ void readPositionFromModbus() {
         }
     } else {
         if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore lettura posizione: 0x%02X\n", result); }
+    }
+}
+
+void readSTM32FirmwareVersion() {
+    uint8_t result = modbus.readHoldingRegisters(REG_RES_STM32_FW_VERSION, 1);
+    if (result == modbus.ku8MBSuccess) {
+        telescope.stm32FirmwareVersion = modbus.getResponseBuffer(0);
+        if (DEBUG_LX200_FULL) {
+            Serial.printf("[Modbus] STM32 FW=0x%04X\n", telescope.stm32FirmwareVersion);
+        }
+    } else if (DEBUG_LX200_FULL) {
+        Serial.printf("[Modbus] Errore lettura versione STM32: 0x%02X\n", result);
     }
 }
 
