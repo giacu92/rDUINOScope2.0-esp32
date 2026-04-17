@@ -137,6 +137,10 @@ by a short mutex. The touch task also keeps a slow idle fallback check and, once
 a press is active, samples until release so future buttons can get stable press
 and release events.
 
+The touch input plumbing lives in `lib/Input/touch_input.h` and
+`lib/Input/touch_input.cpp`, keeping ISR and input-task details out of
+`src/main.cpp`.
+
 ## Stellarium Command Flow
 
 For a GOTO request, the ESP32 receives a target from either protocol path:
@@ -255,11 +259,21 @@ The Modbus task publishes a compact mount-state snapshot protected by a mutex;
 the TCP and display paths copy that snapshot briefly instead of reading live
 cross-core state directly.
 
+The ESP32-to-STM32 Modbus boundary lives in `lib/Mount/mount_link.h` and
+`lib/Mount/mount_link.cpp`. That module owns `ModbusMaster`, RS485 direction
+control, the command queue, STM32 polling, and the mount-state snapshot.
+`src/main.cpp` calls high-level APIs such as `mountLinkRequestGoto(...)` and
+`mountLinkRequestStop()` instead of touching Modbus registers directly.
+
 The main screen also shows an indicative per-core CPU load in the top-right
 header area. `cpuLoadTask` samples FreeRTOS idle hooks once per second and
 updates only that small display region, avoiding a full-screen redraw. The
 numbers are useful for balancing tasks across cores, but they are an idle-time
 estimate rather than a precise profiler.
+
+CPU load monitoring lives in `lib/System/cpu_load.h` and
+`lib/System/cpu_load.cpp`. `src/main.cpp` only starts it with
+`cpuLoadBegin(...)` and reads the latest snapshot for rendering.
 
 ## Configuration Points
 

@@ -27,14 +27,13 @@
 #include <WiFi.h>
 #include <math.h>
 #include <time.h>
-#include <esp_task_wdt.h>
-#include <ModbusMaster.h>
 #include <Adafruit_NeoPixel.h>
-#include <freertos/semphr.h>
-#include <esp_freertos_hooks.h>
 #include "telescope.h"
 #include "config.h"
 #include "display.h"
+#include "cpu_load.h"
+#include "mount_link.h"
+#include "touch_input.h"
 
 // -----------------------------------------------------------------------------
 // Variabili globali
@@ -42,54 +41,15 @@
 
 WiFiServer  tcpServer(STEL_PORT);
 WiFiClient  stelClient;
-ModbusMaster modbus;
 Adafruit_NeoPixel statusLed(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 Telescope telescope(LATITUDE_DEG, LONGITUDE_DEG);
-
-// Posizione CORRENTE del telescopio (letta periodicamente da STM32 via Modbus)
-double currentRA_h    = 0.0;
-double currentDEC_deg = 0.0;
 
 constexpr BaseType_t MODBUS_TASK_CORE = 0;
 constexpr BaseType_t STATUS_LED_TASK_CORE = 0;
 constexpr BaseType_t DISPLAY_TASK_CORE = 1;
 constexpr BaseType_t TOUCH_TASK_CORE = 1;
 constexpr BaseType_t CPU_LOAD_TASK_CORE = 0;
-constexpr TickType_t TOUCH_IDLE_FALLBACK_TICKS = pdMS_TO_TICKS(1000);
-constexpr TickType_t TOUCH_ACTIVE_SAMPLE_TICKS = pdMS_TO_TICKS(50);
-constexpr TickType_t CPU_LOAD_SAMPLE_TICKS = pdMS_TO_TICKS(1000);
-
-struct MountStateSnapshot {
-    double ra_h;
-    double dec_deg;
-    State status;
-    bool isSlewing;
-    bool motorsEnabled;
-    bool trackingEnabled;
-    uint16_t stm32FirmwareVersion;
-    uint32_t updatedAtMs;
-};
-
-struct CpuLoadSnapshot {
-    uint8_t core0;
-    uint8_t core1;
-};
-
-SemaphoreHandle_t mountStateMutex = nullptr;
-MountStateSnapshot mountStateSnapshot = {
-    0.0,
-    0.0,
-    State::IDLE,
-    false,
-    true,
-    false,
-    0,
-    0
-};
-SemaphoreHandle_t cpuLoadMutex = nullptr;
-CpuLoadSnapshot cpuLoadSnapshot = {0, 0};
-volatile uint32_t idleHookCounts[2] = {0, 0};
 
 // FIX [2]: target separato dalla posizione corrente
 double targetRA_h     = 0.0;
@@ -117,26 +77,6 @@ bool lx200Ready = false;
 static uint8_t binBuf[64];
 static int     binIdx = 0;
 
-enum class MountCommandType : uint8_t {
-    GOTO,
-    STOP,
-    SET_TRACKING,
-    SET_MOTORS,
-    JOG_START,
-    JOG_STOP
-};
-
-struct MountCommand {
-    MountCommandType type;
-    int32_t ra_arcsec100;
-    int32_t dec_arcsec100;
-    uint16_t value1;
-    uint16_t value2;
-    uint16_t value3;
-};
-
-QueueHandle_t mountCommandQueue;
-
 unsigned long lastStelUpdate = 0;
 
 enum WifiLedState {
@@ -149,7 +89,6 @@ enum WifiLedState {
 WifiLedState wifiLedState = WIFI_LED_DISCONNECTED;
 bool statusLedHasRendered = false;
 TaskHandle_t displayTaskHandle = nullptr;
-TaskHandle_t touchTaskHandle = nullptr;
 
 // -----------------------------------------------------------------------------
 // Prototipi
@@ -161,13 +100,6 @@ void    renderStellariumConnectedLed();
 void    updateWifiLedFromStatus();
 void    statusLedTask(void* pvParams);
 void    displayTask(void* pvParams);
-void    touchTask(void* pvParams);
-void    cpuLoadTask(void* pvParams);
-void    initTouchInterrupt();
-void IRAM_ATTR touchIrqHandler();
-bool IRAM_ATTR cpuIdleHook0();
-bool IRAM_ATTR cpuIdleHook1();
-void    initCpuLoadMonitor();
 void    notifyDisplayTask();
 void    syncNTP();
 double  calcLST();
@@ -175,28 +107,8 @@ void    handleStellarium();
 void    processLX200Command(const String &cmd);
 void    sendResponse(const String &res);
 bool    executeGoto();
-bool    requestStop();
-bool    requestTrackingEnabled(bool enabled);
-bool    requestTrackingMode(TrackingMode mode);
-bool    requestMotorsEnabled(bool enabled);
-bool    requestJog(uint16_t axis, uint16_t direction, uint16_t speed);
-bool    requestJogStop();
-bool    enqueueMountCommand(const MountCommand &cmd, TickType_t waitTicks = 0);
 void    parseStelBinaryPacket(uint8_t* buf, int len);
 void    sendCurrentPosition(WiFiClient& client);
-void    preTransmission();
-void    postTransmission();
-void    modbusTask(void* pvParams);
-void    readPositionFromModbus();
-void    readSTM32FirmwareVersion();
-void    applyMountCommand(const MountCommand &cmd);
-bool    writeCommandRequest(uint16_t command);
-double  raDeltaHours(double a, double b);
-bool    currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100);
-void    publishMountStateSnapshot();
-MountStateSnapshot getMountStateSnapshot();
-void    publishCpuLoadSnapshot(uint8_t core0, uint8_t core1);
-CpuLoadSnapshot getCpuLoadSnapshot();
 
 // =============================================================================
 //  SETUP
@@ -213,26 +125,13 @@ void setup() {
         delay(700);
     }
 
-    mountStateMutex = xSemaphoreCreateMutex();
-    cpuLoadMutex = xSemaphoreCreateMutex();
-    publishMountStateSnapshot();
-    initCpuLoadMonitor();
+    mountLinkBegin(telescope, notifyDisplayTask);
+    cpuLoadBegin(CPU_LOAD_TASK_CORE, notifyDisplayTask);
 
     displayShowInitScreen("Status LED", "Starting RGB indicator", 10);
     initStatusLed();
 
     displayShowInitScreen("Mount link", "Starting Modbus RTU", 30);
-    pinMode(RS485_DE_PIN, OUTPUT);
-    digitalWrite(RS485_DE_PIN, LOW);
-
-    Serial2.begin(MODBUS_BAUDRATE, SERIAL_8N1, MODBUS_RX_PIN, MODBUS_TX_PIN);
-    modbus.begin(MODBUS_SLAVE_ID, Serial2);
-    modbus.preTransmission(preTransmission);
-    modbus.postTransmission(postTransmission);
-
-    // FIX [9]: crea la coda comandi mount. Il task Modbus parte dopo
-    // la lettura firmware iniziale, così da non condividere ModbusMaster.
-    mountCommandQueue = xQueueCreate(8, sizeof(MountCommand));
 
     displayShowInitScreen("Network", "Connecting WiFi", 55);
     connectWiFi();
@@ -245,8 +144,8 @@ void setup() {
         telescope.setLX200Date(timeinfo);
     }
     displayShowInitScreen("Mount status", "Reading STM32 firmware", 85);
-    readSTM32FirmwareVersion();
-    xTaskCreatePinnedToCore(modbusTask, "modbus", 4096, nullptr, 1, nullptr, MODBUS_TASK_CORE);
+    mountLinkReadSTM32FirmwareVersion();
+    mountLinkStartTask(MODBUS_TASK_CORE);
 
     tcpServer.begin();
     tcpServer.setNoDelay(true);
@@ -254,32 +153,11 @@ void setup() {
     Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
 
     xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
-    xTaskCreatePinnedToCore(touchTask, "touch", 3072, nullptr, 1, &touchTaskHandle, TOUCH_TASK_CORE);
-    xTaskCreatePinnedToCore(cpuLoadTask, "cpu_load", 2048, nullptr, 0, nullptr, CPU_LOAD_TASK_CORE);
-    initTouchInterrupt();
-}
-
-// Differenza minima tra due RA, considerando il wrap 0..24h.
-double raDeltaHours(double a, double b) {
-    double delta = fabs(a - b);
-    if (delta > 12.0) delta = 24.0 - delta;
-    return delta;
-}
-
-bool currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100) {
-    const double RA_TOL_H    = 0.001111;  // circa 1 arcmin in RA
-    const double DEC_TOL_DEG = 0.016667;  // circa 1 arcmin
-
-    double targetRaH  = ((targetRaArcsec100 / 100.0) / 3600.0) / 15.0;
-    double targetDecD =  (targetDecArcsec100 / 100.0) / 3600.0;
-    MountStateSnapshot state = getMountStateSnapshot();
-
-    return raDeltaHours(state.ra_h, targetRaH) <= RA_TOL_H
-        && fabs(state.dec_deg - targetDecD) <= DEC_TOL_DEG;
+    touchInputBegin(TOUCH_TASK_CORE);
 }
 
 // =============================================================================
-//  LOOP  (core 0 – solo WiFi/TCP, niente delay lunghi)
+//  LOOP  (Arduino core 1) - WiFi/TCP, niente delay lunghi
 // =============================================================================
 void loop() {
     handleStellarium();
@@ -405,8 +283,8 @@ void displayTask(void* pvParams) {
     bool hasRendered = false;
 
     for (;;) {
-        MountStateSnapshot state = getMountStateSnapshot();
-        CpuLoadSnapshot cpuLoad = getCpuLoadSnapshot();
+        MountLinkSnapshot state = mountLinkGetSnapshot();
+        CpuLoadSnapshot cpuLoad = cpuLoadGetSnapshot();
         DisplayViewState view = {
             WiFi.status() == WL_CONNECTED ? String("connected") : String("offline"),
             WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("-"),
@@ -450,86 +328,6 @@ void displayTask(void* pvParams) {
 void notifyDisplayTask() {
     if (displayTaskHandle) {
         xTaskNotifyGive(displayTaskHandle);
-    }
-}
-
-bool IRAM_ATTR cpuIdleHook0() {
-    idleHookCounts[0]++;
-    return true;
-}
-
-bool IRAM_ATTR cpuIdleHook1() {
-    idleHookCounts[1]++;
-    return true;
-}
-
-void initCpuLoadMonitor() {
-    esp_register_freertos_idle_hook_for_cpu(cpuIdleHook0, 0);
-    esp_register_freertos_idle_hook_for_cpu(cpuIdleHook1, 1);
-}
-
-void cpuLoadTask(void* pvParams) {
-    (void)pvParams;
-
-    uint32_t previousIdle[2] = {idleHookCounts[0], idleHookCounts[1]};
-    uint32_t maxIdleDelta[2] = {1, 1};
-
-    for (;;) {
-        vTaskDelay(CPU_LOAD_SAMPLE_TICKS);
-
-        uint32_t currentIdle[2] = {idleHookCounts[0], idleHookCounts[1]};
-        uint8_t load[2] = {0, 0};
-
-        for (uint8_t core = 0; core < 2; core++) {
-            uint32_t idleDelta = currentIdle[core] - previousIdle[core];
-            previousIdle[core] = currentIdle[core];
-
-            if (idleDelta > maxIdleDelta[core]) {
-                maxIdleDelta[core] = idleDelta;
-            }
-
-            uint32_t idlePercent = (idleDelta * 100UL) / maxIdleDelta[core];
-            if (idlePercent > 100) idlePercent = 100;
-            load[core] = static_cast<uint8_t>(100 - idlePercent);
-        }
-
-        publishCpuLoadSnapshot(load[0], load[1]);
-    }
-}
-
-void initTouchInterrupt() {
-    pinMode(TOUCH_IRQ_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(TOUCH_IRQ_PIN), touchIrqHandler, FALLING);
-}
-
-void IRAM_ATTR touchIrqHandler() {
-    if (!touchTaskHandle) return;
-
-    BaseType_t higherPriorityTaskWoken = pdFALSE;
-    vTaskNotifyGiveFromISR(touchTaskHandle, &higherPriorityTaskWoken);
-    if (higherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
-    }
-}
-
-void touchTask(void* pvParams) {
-    (void)pvParams;
-
-    bool wasTouching = false;
-
-    for (;;) {
-        TickType_t waitTicks = wasTouching ? TOUCH_ACTIVE_SAMPLE_TICKS : TOUCH_IDLE_FALLBACK_TICKS;
-        ulTaskNotifyTake(pdTRUE, waitTicks);
-
-        uint16_t x = 0;
-        uint16_t y = 0;
-        bool touching = displayGetTouch(x, y);
-
-        if (touching && !wasTouching && DEBUG_LX200_FULL) {
-            Serial.printf("[TOUCH] x=%u y=%u\n", x, y);
-        }
-
-        wasTouching = touching;
     }
 }
 
@@ -872,7 +670,7 @@ void processLX200Command(const String &cmd) {
              cmd.startsWith(":Me#") || cmd.startsWith(":Mw#")) {
         uint16_t axis = (cmd.startsWith(":Mn#") || cmd.startsWith(":Ms#")) ? JOG_AXIS_DEC : JOG_AXIS_RA;
         uint16_t direction = (cmd.startsWith(":Mn#") || cmd.startsWith(":Me#")) ? JOG_DIR_POSITIVE : JOG_DIR_NEGATIVE;
-        requestJog(axis, direction, JOG_SPEED_CENTER);
+        mountLinkRequestJog(axis, direction, JOG_SPEED_CENTER);
         sendResponse("");
     }
 
@@ -902,19 +700,19 @@ void processLX200Command(const String &cmd) {
 
     // --- SLEW STATUS :D# ---
     else if (cmd.startsWith(":D#")) {
-        MountStateSnapshot state = getMountStateSnapshot();
+        MountLinkSnapshot state = mountLinkGetSnapshot();
         sendResponse(state.isSlewing ? "|#" : "#");
     }
 
     // --- ABORT :Q# ---
     else if (cmd.startsWith(":Q#") || cmd.startsWith("Q#")) {
-        requestStop();
+        mountLinkRequestStop();
     }
 
     // --- ABORT MANUAL SLEW AXIS (:Qn#/:Qs#/:Qe#/:Qw#) ---
     else if (cmd.startsWith(":Qn#") || cmd.startsWith(":Qs#") ||
              cmd.startsWith(":Qe#") || cmd.startsWith(":Qw#")) {
-        requestJogStop();
+        mountLinkRequestJogStop();
     }
 
     // --- SET LONGITUDE :SgsDDD*MM#  FIX [5]: parse separato ---
@@ -1006,118 +804,9 @@ void sendResponse(const String &res) {
 //  Condivisa da entrambi i protocolli
 // =============================================================================
 bool executeGoto() {
-    // Converte RA (ore) → arcsec*100  e  DEC (gradi) → arcsec*100
-    // Lo STM32 riceve coordinate assolute in arcsec*100 e le converte in
-    // passi motore internamente (inclusa la conversione RA→HA con il suo clock)
-    int32_t ra_arcsec100  = (int32_t)(targetRA_h    * 15.0 * 3600.0 * 100.0);
-    int32_t dec_arcsec100 = (int32_t)(targetDEC_deg *        3600.0 * 100.0);
-
-    if (DEBUG_LX200_MODBUS) {
-        Serial.printf("[GOTO] RA=%.4fh DEC=%.4f deg -> RA_arcsec100=%ld DEC_arcsec100=%ld\n",
-                      targetRA_h, targetDEC_deg, (long)ra_arcsec100, (long)dec_arcsec100);
-    }
-
-    telescope.setSlewing(true);
-
-    MountCommand cmd = {
-        MountCommandType::GOTO,
-        ra_arcsec100,
-        dec_arcsec100,
-        0,
-        0,
-        0
-    };
-    if (!enqueueMountCommand(cmd, pdMS_TO_TICKS(100))) {
-        if (DEBUG_LX200) { Serial.println("[WARN] Coda GOTO piena, comando scartato."); }
-        telescope.setSlewing(false);
-        publishMountStateSnapshot();
-        return false;
-    }
-    publishMountStateSnapshot();
-
-    return true;
+    return mountLinkRequestGoto(targetRA_h, targetDEC_deg);
 }
 
-bool enqueueMountCommand(const MountCommand &cmd, TickType_t waitTicks) {
-    if (!mountCommandQueue) return false;
-    return xQueueSend(mountCommandQueue, &cmd, waitTicks) == pdTRUE;
-}
-
-bool requestStop() {
-    MountCommand cmd = { MountCommandType::STOP, 0, 0, 0, 0, 0 };
-    telescope.setSlewing(false);
-    publishMountStateSnapshot();
-    return enqueueMountCommand(cmd);
-}
-
-bool requestTrackingEnabled(bool enabled) {
-    MountCommand cmd = {
-        MountCommandType::SET_TRACKING,
-        0,
-        0,
-        static_cast<uint16_t>(enabled ? 1U : 0U),
-        static_cast<uint16_t>(telescope.trackingMode),
-        0
-    };
-    if (enqueueMountCommand(cmd)) {
-        telescope.trackingEnabled = enabled;
-        publishMountStateSnapshot();
-        return true;
-    }
-    return false;
-}
-
-bool requestTrackingMode(TrackingMode mode) {
-    MountCommand cmd = {
-        MountCommandType::SET_TRACKING,
-        0,
-        0,
-        static_cast<uint16_t>(telescope.trackingEnabled ? 1U : 0U),
-        static_cast<uint16_t>(mode),
-        0
-    };
-    if (enqueueMountCommand(cmd)) {
-        telescope.trackingMode = mode;
-        publishMountStateSnapshot();
-        return true;
-    }
-    return false;
-}
-
-bool requestMotorsEnabled(bool enabled) {
-    MountCommand cmd = {
-        MountCommandType::SET_MOTORS,
-        0,
-        0,
-        static_cast<uint16_t>(enabled ? 1U : 0U),
-        0,
-        0
-    };
-    if (enqueueMountCommand(cmd)) {
-        telescope.motorsEnabled = enabled;
-        if (!enabled) telescope.setSlewing(false);
-        publishMountStateSnapshot();
-        return true;
-    }
-    return false;
-}
-
-bool requestJog(uint16_t axis, uint16_t direction, uint16_t speed) {
-    MountCommand cmd = {
-        MountCommandType::JOG_START,
-        0,
-        0,
-        axis,
-        direction,
-        speed
-    };
-    return enqueueMountCommand(cmd);
-}
-
-bool requestJogStop() {
-    MountCommand cmd = { MountCommandType::JOG_STOP, 0, 0, 0, 0, 0 };
-    return enqueueMountCommand(cmd);
-}
 
 // =============================================================================
 //  Parsing pacchetto GOTO Stellarium Desktop (20 byte, little-endian)
@@ -1146,288 +835,6 @@ void parseStelBinaryPacket(uint8_t* buf, int len) {
     executeGoto();
 }
 
-// =============================================================================
-//  Task FreeRTOS Modbus  –  FIX [9] [10]
-//  Gira su core 1, legge dalla coda e gestisce tutta la comunicazione RS485
-// =============================================================================
-void modbusTask(void* pvParams) {
-    // FIX [10]: registra questo task nel watchdog
-    esp_task_wdt_add(nullptr);
-
-    static unsigned long lastPosRead = 0;
-    for (;;) {
-        esp_task_wdt_reset();   // keep-alive watchdog
-
-        MountCommand cmd;
-        if (xQueueReceive(mountCommandQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE) {
-            if (cmd.type != MountCommandType::GOTO) {
-                applyMountCommand(cmd);
-                continue;
-            }
-
-            uint16_t ra_high  = (uint16_t)((cmd.ra_arcsec100  >> 16) & 0xFFFF);
-            uint16_t ra_low   = (uint16_t)( cmd.ra_arcsec100         & 0xFFFF);
-            uint16_t dec_high = (uint16_t)((cmd.dec_arcsec100 >> 16) & 0xFFFF);
-            uint16_t dec_low  = (uint16_t)( cmd.dec_arcsec100        & 0xFFFF);
-
-            modbus.setTransmitBuffer(0, ra_high);
-            modbus.setTransmitBuffer(1, ra_low);
-            modbus.setTransmitBuffer(2, dec_high);
-            modbus.setTransmitBuffer(3, dec_low);
-            modbus.setTransmitBuffer(4, CMD_GOTO);
-            
-            if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] sending: RA_high=0x%04X RA_low=0x%04X DEC_high=0x%04X DEC_low=0x%04X COMMAND=%d\n",
-                          ra_high, ra_low, dec_high, dec_low, 1); }
-
-            uint8_t result = modbus.writeMultipleRegisters(REG_REQ_TARGET_RA_HIGH, 5);
-            if (result != modbus.ku8MBSuccess) {
-                if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore scrittura: 0x%02X\n", result); }
-                telescope.setSlewing(false);
-                publishMountStateSnapshot();
-                continue;
-            }
-
-            uint8_t pendingResult = modbus.writeSingleRegister(REG_REQ_COMMAND_PENDING, 1);
-            if (pendingResult != modbus.ku8MBSuccess) {
-                if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore pending GOTO: 0x%02X\n", pendingResult); }
-                telescope.setSlewing(false);
-                publishMountStateSnapshot();
-                continue;
-            }
-
-            // Polling status STM32 fino a TRACKING (done) o ERROR o timeout
-            // Ogni iterazione legge davvero i registri Modbus e aggiorna telescope
-            const int MAX_POLL = 3000;   // max ~30 secondi (100 ms * 300)
-            bool gotoFinished = false;
-            bool sawSlewing = false;
-            bool warnedTrackingWithoutSlewing = false;
-            for (int i = 0; i < MAX_POLL; i++) {
-                esp_task_wdt_reset();
-                vTaskDelay(pdMS_TO_TICKS(100));
-
-                readPositionFromModbus();   // aggiorna telescope.status, ra, dec
-
-                if (telescope.status == State::SLEWING) {
-                    sawSlewing = true;
-                } else if (telescope.status == State::TRACKING) {
-                    if (sawSlewing || currentPositionMatchesTarget(cmd.ra_arcsec100, cmd.dec_arcsec100)) {
-                        if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
-                        telescope.setSlewing(false);
-                        publishMountStateSnapshot();
-                        gotoFinished = true;
-                        break;
-                    }
-
-                    if (i > 5 && !warnedTrackingWithoutSlewing && DEBUG_LX200_MODBUS) {
-                        Serial.println("[Modbus] TRACKING letto senza SLEWING: attendo avvio reale GOTO.");
-                        warnedTrackingWithoutSlewing = true;
-                    }
-                } else if (telescope.status == State::ERROR) {
-                    if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 ha riportato errore GOTO."); }
-                    telescope.setSlewing(false);
-                    publishMountStateSnapshot();
-                    gotoFinished = true;
-                    break;
-                } else if (telescope.status == State::IDLE) {
-                    // STM32 tornato IDLE senza passare per TRACKING: GOTO non partito?
-                    if (i > 2) {   // ignora i primi cicli (latenza comando)
-                        if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 IDLE durante GOTO, uscita."); }
-                        telescope.setSlewing(false);
-                        publishMountStateSnapshot();
-                        gotoFinished = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!gotoFinished) {
-                if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] Timeout polling STM32."); }
-                telescope.setSlewing(false);
-                publishMountStateSnapshot();
-            }
-            lastPosRead = millis();   // evita doppia lettura immediata a fine GOTO
-        }
-
-        // Lettura periodica della posizione corrente (~4 volte/secondo)
-        if (millis() - lastPosRead >= 250) {
-            lastPosRead = millis();
-            readPositionFromModbus();
-        }
-    }
-}
-
-void applyMountCommand(const MountCommand &cmd) {
-    uint8_t result = modbus.ku8MBSuccess;
-
-    switch (cmd.type) {
-        case MountCommandType::STOP:
-            result = writeCommandRequest(CMD_STOP) ? modbus.ku8MBSuccess : 0xFF;
-            if (result == modbus.ku8MBSuccess) {
-                telescope.setSlewing(false);
-                publishMountStateSnapshot();
-            }
-            break;
-
-        case MountCommandType::SET_TRACKING:
-            result = modbus.writeSingleRegister(REG_REQ_TRACKING_ENABLE, cmd.value1);
-            if (result == modbus.ku8MBSuccess) {
-                result = modbus.writeSingleRegister(REG_REQ_TRACKING_MODE, cmd.value2);
-            }
-            if (result == modbus.ku8MBSuccess) {
-                result = writeCommandRequest(CMD_SET_TRACKING) ? modbus.ku8MBSuccess : 0xFF;
-            }
-            break;
-
-        case MountCommandType::SET_MOTORS:
-            result = modbus.writeSingleRegister(REG_REQ_MOTORS_ENABLE, cmd.value1);
-            if (result == modbus.ku8MBSuccess) {
-                result = writeCommandRequest(CMD_SET_MOTORS) ? modbus.ku8MBSuccess : 0xFF;
-            }
-            break;
-
-        case MountCommandType::JOG_START:
-            result = modbus.writeSingleRegister(REG_REQ_JOG_AXIS, cmd.value1);
-            if (result == modbus.ku8MBSuccess) {
-                result = modbus.writeSingleRegister(REG_REQ_JOG_DIRECTION, cmd.value2);
-            }
-            if (result == modbus.ku8MBSuccess) {
-                result = modbus.writeSingleRegister(REG_REQ_JOG_SPEED, cmd.value3);
-            }
-            if (result == modbus.ku8MBSuccess) {
-                result = writeCommandRequest(CMD_JOG_START) ? modbus.ku8MBSuccess : 0xFF;
-            }
-            break;
-
-        case MountCommandType::JOG_STOP:
-            result = writeCommandRequest(CMD_JOG_STOP) ? modbus.ku8MBSuccess : 0xFF;
-            break;
-
-        case MountCommandType::GOTO:
-        default:
-            return;
-    }
-
-    if (result != modbus.ku8MBSuccess && DEBUG_LX200_MODBUS) {
-        Serial.printf("[Modbus] Errore comando mount: type=%d result=0x%02X\n",
-                      (int)cmd.type,
-                      result);
-    }
-}
-
-bool writeCommandRequest(uint16_t command) {
-    uint8_t commandResult = modbus.writeSingleRegister(REG_REQ_COMMAND, command);
-    if (commandResult != modbus.ku8MBSuccess) return false;
-
-    uint8_t pendingResult = modbus.writeSingleRegister(REG_REQ_COMMAND_PENDING, 1);
-    if (pendingResult != modbus.ku8MBSuccess) return false;
-
-    if (DEBUG_LX200_MODBUS) {
-        Serial.printf("[Modbus] COMMAND request = %u.\n", command);
-    }
-    return true;
-}
-
-// =============================================================================
-//  Legge STATUS + posizione corrente da STM32 (REG 5..9, 5 registri)
-//  Aggiorna telescope.status, telescope.ra, telescope.dec, currentRA_h, currentDEC_deg
-// =============================================================================
-void readPositionFromModbus() {
-    uint8_t result = modbus.readHoldingRegisters(REG_RES_STATUS, 5);
-    if (result == modbus.ku8MBSuccess) {
-        telescope.status = static_cast<State>(modbus.getResponseBuffer(0) & 0xF);
-
-        // RA e DEC sono in arcsec*100, signed 32-bit, split su due 16-bit registers
-        int32_t ra_arcsec100  = (int32_t)((uint32_t)modbus.getResponseBuffer(1) << 16
-                                         | (uint32_t)modbus.getResponseBuffer(2));
-        int32_t dec_arcsec100 = (int32_t)((uint32_t)modbus.getResponseBuffer(3) << 16
-                                         | (uint32_t)modbus.getResponseBuffer(4));
-
-        // arcsec*100 → gradi → ore (solo RA)
-        currentRA_h    = (ra_arcsec100  / 100.0) / 3600.0 / 15.0;
-        currentDEC_deg = (dec_arcsec100 / 100.0) / 3600.0;
-        telescope.ra   = currentRA_h;
-        telescope.dec  = currentDEC_deg;
-        telescope.isSlewing = (telescope.status == State::SLEWING);
-        publishMountStateSnapshot();
-
-        if (DEBUG_LX200_FULL) {
-            Serial.printf("[Modbus] Status=%d RA=%.4fh DEC=%.4f°\n",
-                          (int)telescope.status, currentRA_h, currentDEC_deg);
-        }
-    } else {
-        if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore lettura posizione: 0x%02X\n", result); }
-    }
-}
-
-void readSTM32FirmwareVersion() {
-    uint8_t result = modbus.readHoldingRegisters(REG_RES_STM32_FW_VERSION, 1);
-    if (result == modbus.ku8MBSuccess) {
-        telescope.stm32FirmwareVersion = modbus.getResponseBuffer(0);
-        publishMountStateSnapshot();
-        if (DEBUG_LX200_FULL) {
-            Serial.printf("[Modbus] STM32 FW=0x%04X\n", telescope.stm32FirmwareVersion);
-        }
-    } else if (DEBUG_LX200_FULL) {
-        Serial.printf("[Modbus] Errore lettura versione STM32: 0x%02X\n", result);
-    }
-}
-
-void publishMountStateSnapshot() {
-    if (!mountStateMutex) return;
-
-    MountStateSnapshot snapshot = {
-        currentRA_h,
-        currentDEC_deg,
-        telescope.status,
-        telescope.isSlewing,
-        telescope.motorsEnabled,
-        telescope.trackingEnabled,
-        telescope.stm32FirmwareVersion,
-        millis()
-    };
-
-    bool shouldNotifyDisplay = false;
-    if (xSemaphoreTake(mountStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        shouldNotifyDisplay = snapshot.motorsEnabled != mountStateSnapshot.motorsEnabled
-                           || snapshot.trackingEnabled != mountStateSnapshot.trackingEnabled
-                           || snapshot.stm32FirmwareVersion != mountStateSnapshot.stm32FirmwareVersion;
-        mountStateSnapshot = snapshot;
-        xSemaphoreGive(mountStateMutex);
-    }
-    if (shouldNotifyDisplay) {
-        notifyDisplayTask();
-    }
-}
-
-MountStateSnapshot getMountStateSnapshot() {
-    MountStateSnapshot snapshot = mountStateSnapshot;
-    if (mountStateMutex && xSemaphoreTake(mountStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        snapshot = mountStateSnapshot;
-        xSemaphoreGive(mountStateMutex);
-    }
-    return snapshot;
-}
-
-void publishCpuLoadSnapshot(uint8_t core0, uint8_t core1) {
-    bool changed = false;
-    if (cpuLoadMutex && xSemaphoreTake(cpuLoadMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        changed = core0 != cpuLoadSnapshot.core0 || core1 != cpuLoadSnapshot.core1;
-        cpuLoadSnapshot = {core0, core1};
-        xSemaphoreGive(cpuLoadMutex);
-    }
-    if (changed) {
-        notifyDisplayTask();
-    }
-}
-
-CpuLoadSnapshot getCpuLoadSnapshot() {
-    CpuLoadSnapshot snapshot = cpuLoadSnapshot;
-    if (cpuLoadMutex && xSemaphoreTake(cpuLoadMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        snapshot = cpuLoadSnapshot;
-        xSemaphoreGive(cpuLoadMutex);
-    }
-    return snapshot;
-}
 
 // =============================================================================
 //  Invio posizione corrente a Stellarium (pacchetto 24 byte)
@@ -1435,7 +842,7 @@ CpuLoadSnapshot getCpuLoadSnapshot() {
 void sendCurrentPosition(WiFiClient& client) {
     if (!client || !client.connected()) return;
 
-    MountStateSnapshot state = getMountStateSnapshot();
+    MountLinkSnapshot state = mountLinkGetSnapshot();
     uint32_t ra_raw  = (uint32_t)((state.ra_h    / 24.0) * 0xFFFFFFFFUL);
     int32_t  dec_raw = (int32_t) ((state.dec_deg / 90.0) * 0x3FFFFFFFL);
 
@@ -1459,9 +866,3 @@ void sendCurrentPosition(WiFiClient& client) {
 
     client.write(pkt, 24);
 }
-
-// =============================================================================
-//  RS485 direction callbacks
-// =============================================================================
-void preTransmission()  { digitalWrite(RS485_DE_PIN, HIGH); }
-void postTransmission() { digitalWrite(RS485_DE_PIN, LOW);  }
