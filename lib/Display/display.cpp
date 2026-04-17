@@ -3,6 +3,8 @@
 #include "display.h"
 
 #include <LovyanGFX.hpp>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "config.h"
 
 namespace {
@@ -87,6 +89,7 @@ public:
 
 RDuinoDisplay lcd;
 bool displayReady = false;
+SemaphoreHandle_t displayMutex = nullptr;
 
 constexpr uint16_t COLOR_BG = 0x0000;
 constexpr uint16_t COLOR_PANEL = 0x0841;
@@ -102,6 +105,17 @@ void drawHeader(const char* title) {
     lcd.setTextDatum(textdatum_t::middle_left);
     lcd.setFont(&fonts::Font2);
     lcd.drawString(title, 12, 14);
+}
+
+void drawCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load) {
+    char text[18];
+    snprintf(text, sizeof(text), "C0 %u%% C1 %u%%", cpu0Load, cpu1Load);
+
+    lcd.fillRect(lcd.width() - 128, 0, 128, 28, COLOR_PANEL);
+    lcd.setTextColor(COLOR_MUTED, COLOR_PANEL);
+    lcd.setTextDatum(textdatum_t::middle_right);
+    lcd.setFont(&fonts::Font2);
+    lcd.drawString(text, lcd.width() - 8, 14);
 }
 
 void drawStatusLine(int y, const char* label, const char* value, uint16_t color) {
@@ -124,12 +138,28 @@ void drawProgress(uint8_t progress) {
     lcd.fillRect(x + 1, y + 1, max(0, filled - 2), h - 2, COLOR_ACCENT);
 }
 
+bool lockDisplay(TickType_t timeout = pdMS_TO_TICKS(200)) {
+    return !displayMutex || xSemaphoreTake(displayMutex, timeout) == pdTRUE;
+}
+
+void unlockDisplay() {
+    if (displayMutex) {
+        xSemaphoreGive(displayMutex);
+    }
+}
+
 } // namespace
 
 bool displayBegin() {
     if (displayReady) return true;
 
+    if (!displayMutex) {
+        displayMutex = xSemaphoreCreateMutex();
+    }
+    if (!lockDisplay()) return false;
+
     if (!lcd.init()) {
+        unlockDisplay();
         return false;
     }
 
@@ -138,11 +168,13 @@ bool displayBegin() {
     lcd.setColorDepth(16);
     lcd.fillScreen(COLOR_BG);
     displayReady = true;
+    unlockDisplay();
     return true;
 }
 
 void displayShowBootScreen() {
     if (!displayReady) return;
+    if (!lockDisplay()) return;
 
     lcd.fillScreen(COLOR_BG);
     lcd.drawRect(10, 10, lcd.width() - 20, lcd.height() - 20, COLOR_ACCENT);
@@ -159,10 +191,12 @@ void displayShowBootScreen() {
     lcd.drawString("ESP32-S3 interface", lcd.width() / 2, 262);
     lcd.setTextColor(COLOR_ACCENT, COLOR_BG);
     lcd.drawString("Starting controller", lcd.width() / 2, lcd.height() - 48);
+    unlockDisplay();
 }
 
 void displayShowInitScreen(const char* step, const char* detail, uint8_t progress) {
     if (!displayReady) return;
+    if (!lockDisplay()) return;
 
     lcd.fillScreen(COLOR_BG);
     drawHeader("System init");
@@ -176,20 +210,24 @@ void displayShowInitScreen(const char* step, const char* detail, uint8_t progres
     lcd.setTextColor(COLOR_MUTED, COLOR_BG);
     lcd.drawString(detail ? detail : "", 18, 168);
 
-    drawStatusLine(72,  "Display", "ILI9488", COLOR_OK);
+    drawStatusLine(72,  "Display", "ILI9341", COLOR_OK);
     drawStatusLine(88, "Touch", "XPT2046", COLOR_OK);
     drawStatusLine(102, "Mount link", progress >= 40 ? "ready" : "starting", progress >= 40 ? COLOR_OK : COLOR_WARN);
     drawStatusLine(118, "Network", progress >= 70 ? "ready" : "waiting", progress >= 70 ? COLOR_OK : COLOR_WARN);
 
     drawProgress(progress);
+    unlockDisplay();
 }
 
 void displayShowMainScreen(const char* wifiStatus,
                            const char* ipAddress,
                            uint16_t stm32FirmwareVersion,
                            bool motorsEnabled,
-                           bool trackingEnabled) {
+                           bool trackingEnabled,
+                           uint8_t cpu0Load,
+                           uint8_t cpu1Load) {
     if (!displayReady) return;
+    if (!lockDisplay()) return;
 
     char version[12];
     snprintf(version, sizeof(version), "%u.%u",
@@ -198,6 +236,7 @@ void displayShowMainScreen(const char* wifiStatus,
 
     lcd.fillScreen(COLOR_BG);
     drawHeader("Main");
+    drawCpuLoad(cpu0Load, cpu1Load);
 
     lcd.setTextDatum(textdatum_t::middle_left);
     lcd.setFont(&fonts::Font4);
@@ -214,14 +253,27 @@ void displayShowMainScreen(const char* wifiStatus,
     lcd.setTextDatum(textdatum_t::middle_center);
     lcd.setTextColor(COLOR_ACCENT, COLOR_BG);
     lcd.drawString("Options", lcd.width() / 2, lcd.height() - 59);
+    unlockDisplay();
+}
+
+void displayShowCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load) {
+    if (!displayReady) return;
+    if (!lockDisplay()) return;
+    drawCpuLoad(cpu0Load, cpu1Load);
+    unlockDisplay();
 }
 
 bool displayGetTouch(uint16_t& x, uint16_t& y) {
     if (!displayReady) return false;
-    return lcd.getTouch(&x, &y);
+    if (!lockDisplay(pdMS_TO_TICKS(100))) return false;
+    bool touched = lcd.getTouch(&x, &y);
+    unlockDisplay();
+    return touched;
 }
 
 void displaySetBacklight(uint8_t brightness) {
     if (!displayReady) return;
+    if (!lockDisplay()) return;
     lcd.setBrightness(brightness);
+    unlockDisplay();
 }

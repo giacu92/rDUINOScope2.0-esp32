@@ -30,6 +30,8 @@
 #include <esp_task_wdt.h>
 #include <ModbusMaster.h>
 #include <Adafruit_NeoPixel.h>
+#include <freertos/semphr.h>
+#include <esp_freertos_hooks.h>
 #include "telescope.h"
 #include "config.h"
 #include "display.h"
@@ -48,6 +50,46 @@ Telescope telescope(LATITUDE_DEG, LONGITUDE_DEG);
 // Posizione CORRENTE del telescopio (letta periodicamente da STM32 via Modbus)
 double currentRA_h    = 0.0;
 double currentDEC_deg = 0.0;
+
+constexpr BaseType_t MODBUS_TASK_CORE = 0;
+constexpr BaseType_t STATUS_LED_TASK_CORE = 0;
+constexpr BaseType_t DISPLAY_TASK_CORE = 1;
+constexpr BaseType_t TOUCH_TASK_CORE = 1;
+constexpr BaseType_t CPU_LOAD_TASK_CORE = 0;
+constexpr TickType_t TOUCH_IDLE_FALLBACK_TICKS = pdMS_TO_TICKS(1000);
+constexpr TickType_t TOUCH_ACTIVE_SAMPLE_TICKS = pdMS_TO_TICKS(50);
+constexpr TickType_t CPU_LOAD_SAMPLE_TICKS = pdMS_TO_TICKS(1000);
+
+struct MountStateSnapshot {
+    double ra_h;
+    double dec_deg;
+    State status;
+    bool isSlewing;
+    bool motorsEnabled;
+    bool trackingEnabled;
+    uint16_t stm32FirmwareVersion;
+    uint32_t updatedAtMs;
+};
+
+struct CpuLoadSnapshot {
+    uint8_t core0;
+    uint8_t core1;
+};
+
+SemaphoreHandle_t mountStateMutex = nullptr;
+MountStateSnapshot mountStateSnapshot = {
+    0.0,
+    0.0,
+    State::IDLE,
+    false,
+    true,
+    false,
+    0,
+    0
+};
+SemaphoreHandle_t cpuLoadMutex = nullptr;
+CpuLoadSnapshot cpuLoadSnapshot = {0, 0};
+volatile uint32_t idleHookCounts[2] = {0, 0};
 
 // FIX [2]: target separato dalla posizione corrente
 double targetRA_h     = 0.0;
@@ -106,6 +148,8 @@ enum WifiLedState {
 
 WifiLedState wifiLedState = WIFI_LED_DISCONNECTED;
 bool statusLedHasRendered = false;
+TaskHandle_t displayTaskHandle = nullptr;
+TaskHandle_t touchTaskHandle = nullptr;
 
 // -----------------------------------------------------------------------------
 // Prototipi
@@ -116,6 +160,15 @@ void    setWifiLedState(WifiLedState state);
 void    renderStellariumConnectedLed();
 void    updateWifiLedFromStatus();
 void    statusLedTask(void* pvParams);
+void    displayTask(void* pvParams);
+void    touchTask(void* pvParams);
+void    cpuLoadTask(void* pvParams);
+void    initTouchInterrupt();
+void IRAM_ATTR touchIrqHandler();
+bool IRAM_ATTR cpuIdleHook0();
+bool IRAM_ATTR cpuIdleHook1();
+void    initCpuLoadMonitor();
+void    notifyDisplayTask();
 void    syncNTP();
 double  calcLST();
 void    handleStellarium();
@@ -140,6 +193,10 @@ void    applyMountCommand(const MountCommand &cmd);
 bool    writeCommandRequest(uint16_t command);
 double  raDeltaHours(double a, double b);
 bool    currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecArcsec100);
+void    publishMountStateSnapshot();
+MountStateSnapshot getMountStateSnapshot();
+void    publishCpuLoadSnapshot(uint8_t core0, uint8_t core1);
+CpuLoadSnapshot getCpuLoadSnapshot();
 
 // =============================================================================
 //  SETUP
@@ -156,6 +213,11 @@ void setup() {
         delay(700);
     }
 
+    mountStateMutex = xSemaphoreCreateMutex();
+    cpuLoadMutex = xSemaphoreCreateMutex();
+    publishMountStateSnapshot();
+    initCpuLoadMonitor();
+
     displayShowInitScreen("Status LED", "Starting RGB indicator", 10);
     initStatusLed();
 
@@ -168,9 +230,9 @@ void setup() {
     modbus.preTransmission(preTransmission);
     modbus.postTransmission(postTransmission);
 
-    // FIX [9]: crea la coda comandi mount e il task Modbus
+    // FIX [9]: crea la coda comandi mount. Il task Modbus parte dopo
+    // la lettura firmware iniziale, così da non condividere ModbusMaster.
     mountCommandQueue = xQueueCreate(8, sizeof(MountCommand));
-    xTaskCreatePinnedToCore(modbusTask, "modbus", 4096, nullptr, 1, nullptr, 1);
 
     displayShowInitScreen("Network", "Connecting WiFi", 55);
     connectWiFi();
@@ -184,18 +246,17 @@ void setup() {
     }
     displayShowInitScreen("Mount status", "Reading STM32 firmware", 85);
     readSTM32FirmwareVersion();
+    xTaskCreatePinnedToCore(modbusTask, "modbus", 4096, nullptr, 1, nullptr, MODBUS_TASK_CORE);
 
     tcpServer.begin();
     tcpServer.setNoDelay(true);
     displayShowInitScreen("TCP server", "Port 10003 ready", 95);
     Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
 
-    String ipAddress = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("-");
-    displayShowMainScreen(WiFi.status() == WL_CONNECTED ? "connected" : "offline",
-                          ipAddress.c_str(),
-                          telescope.stm32FirmwareVersion,
-                          telescope.motorsEnabled,
-                          telescope.trackingEnabled);
+    xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
+    xTaskCreatePinnedToCore(touchTask, "touch", 3072, nullptr, 1, &touchTaskHandle, TOUCH_TASK_CORE);
+    xTaskCreatePinnedToCore(cpuLoadTask, "cpu_load", 2048, nullptr, 0, nullptr, CPU_LOAD_TASK_CORE);
+    initTouchInterrupt();
 }
 
 // Differenza minima tra due RA, considerando il wrap 0..24h.
@@ -211,9 +272,10 @@ bool currentPositionMatchesTarget(int32_t targetRaArcsec100, int32_t targetDecAr
 
     double targetRaH  = ((targetRaArcsec100 / 100.0) / 3600.0) / 15.0;
     double targetDecD =  (targetDecArcsec100 / 100.0) / 3600.0;
+    MountStateSnapshot state = getMountStateSnapshot();
 
-    return raDeltaHours(currentRA_h, targetRaH) <= RA_TOL_H
-        && fabs(currentDEC_deg - targetDecD) <= DEC_TOL_DEG;
+    return raDeltaHours(state.ra_h, targetRaH) <= RA_TOL_H
+        && fabs(state.dec_deg - targetDecD) <= DEC_TOL_DEG;
 }
 
 // =============================================================================
@@ -255,13 +317,14 @@ void initStatusLed() {
     statusLed.begin();
     statusLed.setBrightness(RGB_LED_BRIGHTNESS);
     setWifiLedState(WIFI_LED_DISCONNECTED);
-    xTaskCreatePinnedToCore(statusLedTask, "status_led", 2048, nullptr, 0, nullptr, 0);
+    xTaskCreatePinnedToCore(statusLedTask, "status_led", 2048, nullptr, 0, nullptr, STATUS_LED_TASK_CORE);
 }
 
 void setWifiLedState(WifiLedState state) {
     if (wifiLedState == state && statusLedHasRendered) return;
 
     wifiLedState = state;
+    notifyDisplayTask();
 
     uint32_t color = 0;
     switch (state) {
@@ -322,6 +385,151 @@ void statusLedTask(void* pvParams) {
             renderStellariumConnectedLed();
         }
         vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+void displayTask(void* pvParams) {
+    (void)pvParams;
+
+    struct DisplayViewState {
+        String wifiStatus;
+        String ipAddress;
+        uint16_t stm32FirmwareVersion;
+        bool motorsEnabled;
+        bool trackingEnabled;
+        uint8_t cpu0Load;
+        uint8_t cpu1Load;
+    };
+
+    DisplayViewState lastRendered = {};
+    bool hasRendered = false;
+
+    for (;;) {
+        MountStateSnapshot state = getMountStateSnapshot();
+        CpuLoadSnapshot cpuLoad = getCpuLoadSnapshot();
+        DisplayViewState view = {
+            WiFi.status() == WL_CONNECTED ? String("connected") : String("offline"),
+            WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("-"),
+            state.stm32FirmwareVersion,
+            state.motorsEnabled,
+            state.trackingEnabled,
+            cpuLoad.core0,
+            cpuLoad.core1
+        };
+
+        bool mainChanged = !hasRendered
+                        || view.wifiStatus != lastRendered.wifiStatus
+                        || view.ipAddress != lastRendered.ipAddress
+                        || view.stm32FirmwareVersion != lastRendered.stm32FirmwareVersion
+                        || view.motorsEnabled != lastRendered.motorsEnabled
+                        || view.trackingEnabled != lastRendered.trackingEnabled;
+        bool cpuChanged = !hasRendered
+                       || view.cpu0Load != lastRendered.cpu0Load
+                       || view.cpu1Load != lastRendered.cpu1Load;
+
+        if (mainChanged) {
+            displayShowMainScreen(view.wifiStatus.c_str(),
+                                  view.ipAddress.c_str(),
+                                  view.stm32FirmwareVersion,
+                                  view.motorsEnabled,
+                                  view.trackingEnabled,
+                                  view.cpu0Load,
+                                  view.cpu1Load);
+            lastRendered = view;
+            hasRendered = true;
+        } else if (cpuChanged) {
+            displayShowCpuLoad(view.cpu0Load, view.cpu1Load);
+            lastRendered.cpu0Load = view.cpu0Load;
+            lastRendered.cpu1Load = view.cpu1Load;
+        }
+
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+}
+
+void notifyDisplayTask() {
+    if (displayTaskHandle) {
+        xTaskNotifyGive(displayTaskHandle);
+    }
+}
+
+bool IRAM_ATTR cpuIdleHook0() {
+    idleHookCounts[0]++;
+    return true;
+}
+
+bool IRAM_ATTR cpuIdleHook1() {
+    idleHookCounts[1]++;
+    return true;
+}
+
+void initCpuLoadMonitor() {
+    esp_register_freertos_idle_hook_for_cpu(cpuIdleHook0, 0);
+    esp_register_freertos_idle_hook_for_cpu(cpuIdleHook1, 1);
+}
+
+void cpuLoadTask(void* pvParams) {
+    (void)pvParams;
+
+    uint32_t previousIdle[2] = {idleHookCounts[0], idleHookCounts[1]};
+    uint32_t maxIdleDelta[2] = {1, 1};
+
+    for (;;) {
+        vTaskDelay(CPU_LOAD_SAMPLE_TICKS);
+
+        uint32_t currentIdle[2] = {idleHookCounts[0], idleHookCounts[1]};
+        uint8_t load[2] = {0, 0};
+
+        for (uint8_t core = 0; core < 2; core++) {
+            uint32_t idleDelta = currentIdle[core] - previousIdle[core];
+            previousIdle[core] = currentIdle[core];
+
+            if (idleDelta > maxIdleDelta[core]) {
+                maxIdleDelta[core] = idleDelta;
+            }
+
+            uint32_t idlePercent = (idleDelta * 100UL) / maxIdleDelta[core];
+            if (idlePercent > 100) idlePercent = 100;
+            load[core] = static_cast<uint8_t>(100 - idlePercent);
+        }
+
+        publishCpuLoadSnapshot(load[0], load[1]);
+    }
+}
+
+void initTouchInterrupt() {
+    pinMode(TOUCH_IRQ_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(TOUCH_IRQ_PIN), touchIrqHandler, FALLING);
+}
+
+void IRAM_ATTR touchIrqHandler() {
+    if (!touchTaskHandle) return;
+
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(touchTaskHandle, &higherPriorityTaskWoken);
+    if (higherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+void touchTask(void* pvParams) {
+    (void)pvParams;
+
+    bool wasTouching = false;
+
+    for (;;) {
+        TickType_t waitTicks = wasTouching ? TOUCH_ACTIVE_SAMPLE_TICKS : TOUCH_IDLE_FALLBACK_TICKS;
+        ulTaskNotifyTake(pdTRUE, waitTicks);
+
+        uint16_t x = 0;
+        uint16_t y = 0;
+        bool touching = displayGetTouch(x, y);
+
+        if (touching && !wasTouching && DEBUG_LX200_FULL) {
+            Serial.printf("[TOUCH] x=%u y=%u\n", x, y);
+        }
+
+        wasTouching = touching;
     }
 }
 
@@ -694,12 +902,12 @@ void processLX200Command(const String &cmd) {
 
     // --- SLEW STATUS :D# ---
     else if (cmd.startsWith(":D#")) {
-        sendResponse(telescope.isSlewing ? "|#" : "#");
+        MountStateSnapshot state = getMountStateSnapshot();
+        sendResponse(state.isSlewing ? "|#" : "#");
     }
 
     // --- ABORT :Q# ---
     else if (cmd.startsWith(":Q#") || cmd.startsWith("Q#")) {
-        telescope.setSlewing(false);
         requestStop();
     }
 
@@ -822,8 +1030,10 @@ bool executeGoto() {
     if (!enqueueMountCommand(cmd, pdMS_TO_TICKS(100))) {
         if (DEBUG_LX200) { Serial.println("[WARN] Coda GOTO piena, comando scartato."); }
         telescope.setSlewing(false);
+        publishMountStateSnapshot();
         return false;
     }
+    publishMountStateSnapshot();
 
     return true;
 }
@@ -836,6 +1046,7 @@ bool enqueueMountCommand(const MountCommand &cmd, TickType_t waitTicks) {
 bool requestStop() {
     MountCommand cmd = { MountCommandType::STOP, 0, 0, 0, 0, 0 };
     telescope.setSlewing(false);
+    publishMountStateSnapshot();
     return enqueueMountCommand(cmd);
 }
 
@@ -850,6 +1061,7 @@ bool requestTrackingEnabled(bool enabled) {
     };
     if (enqueueMountCommand(cmd)) {
         telescope.trackingEnabled = enabled;
+        publishMountStateSnapshot();
         return true;
     }
     return false;
@@ -866,6 +1078,7 @@ bool requestTrackingMode(TrackingMode mode) {
     };
     if (enqueueMountCommand(cmd)) {
         telescope.trackingMode = mode;
+        publishMountStateSnapshot();
         return true;
     }
     return false;
@@ -883,6 +1096,7 @@ bool requestMotorsEnabled(bool enabled) {
     if (enqueueMountCommand(cmd)) {
         telescope.motorsEnabled = enabled;
         if (!enabled) telescope.setSlewing(false);
+        publishMountStateSnapshot();
         return true;
     }
     return false;
@@ -969,6 +1183,7 @@ void modbusTask(void* pvParams) {
             if (result != modbus.ku8MBSuccess) {
                 if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore scrittura: 0x%02X\n", result); }
                 telescope.setSlewing(false);
+                publishMountStateSnapshot();
                 continue;
             }
 
@@ -976,6 +1191,7 @@ void modbusTask(void* pvParams) {
             if (pendingResult != modbus.ku8MBSuccess) {
                 if (DEBUG_LX200_MODBUS) { Serial.printf("[Modbus] Errore pending GOTO: 0x%02X\n", pendingResult); }
                 telescope.setSlewing(false);
+                publishMountStateSnapshot();
                 continue;
             }
 
@@ -997,6 +1213,7 @@ void modbusTask(void* pvParams) {
                     if (sawSlewing || currentPositionMatchesTarget(cmd.ra_arcsec100, cmd.dec_arcsec100)) {
                         if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] GOTO completato, tracking attivo."); }
                         telescope.setSlewing(false);
+                        publishMountStateSnapshot();
                         gotoFinished = true;
                         break;
                     }
@@ -1008,6 +1225,7 @@ void modbusTask(void* pvParams) {
                 } else if (telescope.status == State::ERROR) {
                     if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 ha riportato errore GOTO."); }
                     telescope.setSlewing(false);
+                    publishMountStateSnapshot();
                     gotoFinished = true;
                     break;
                 } else if (telescope.status == State::IDLE) {
@@ -1015,6 +1233,7 @@ void modbusTask(void* pvParams) {
                     if (i > 2) {   // ignora i primi cicli (latenza comando)
                         if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] STM32 IDLE durante GOTO, uscita."); }
                         telescope.setSlewing(false);
+                        publishMountStateSnapshot();
                         gotoFinished = true;
                         break;
                     }
@@ -1024,6 +1243,7 @@ void modbusTask(void* pvParams) {
             if (!gotoFinished) {
                 if (DEBUG_LX200_MODBUS) { Serial.println("[Modbus] Timeout polling STM32."); }
                 telescope.setSlewing(false);
+                publishMountStateSnapshot();
             }
             lastPosRead = millis();   // evita doppia lettura immediata a fine GOTO
         }
@@ -1042,7 +1262,10 @@ void applyMountCommand(const MountCommand &cmd) {
     switch (cmd.type) {
         case MountCommandType::STOP:
             result = writeCommandRequest(CMD_STOP) ? modbus.ku8MBSuccess : 0xFF;
-            if (result == modbus.ku8MBSuccess) telescope.setSlewing(false);
+            if (result == modbus.ku8MBSuccess) {
+                telescope.setSlewing(false);
+                publishMountStateSnapshot();
+            }
             break;
 
         case MountCommandType::SET_TRACKING:
@@ -1125,6 +1348,7 @@ void readPositionFromModbus() {
         telescope.ra   = currentRA_h;
         telescope.dec  = currentDEC_deg;
         telescope.isSlewing = (telescope.status == State::SLEWING);
+        publishMountStateSnapshot();
 
         if (DEBUG_LX200_FULL) {
             Serial.printf("[Modbus] Status=%d RA=%.4fh DEC=%.4f°\n",
@@ -1139,6 +1363,7 @@ void readSTM32FirmwareVersion() {
     uint8_t result = modbus.readHoldingRegisters(REG_RES_STM32_FW_VERSION, 1);
     if (result == modbus.ku8MBSuccess) {
         telescope.stm32FirmwareVersion = modbus.getResponseBuffer(0);
+        publishMountStateSnapshot();
         if (DEBUG_LX200_FULL) {
             Serial.printf("[Modbus] STM32 FW=0x%04X\n", telescope.stm32FirmwareVersion);
         }
@@ -1147,14 +1372,72 @@ void readSTM32FirmwareVersion() {
     }
 }
 
+void publishMountStateSnapshot() {
+    if (!mountStateMutex) return;
+
+    MountStateSnapshot snapshot = {
+        currentRA_h,
+        currentDEC_deg,
+        telescope.status,
+        telescope.isSlewing,
+        telescope.motorsEnabled,
+        telescope.trackingEnabled,
+        telescope.stm32FirmwareVersion,
+        millis()
+    };
+
+    bool shouldNotifyDisplay = false;
+    if (xSemaphoreTake(mountStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        shouldNotifyDisplay = snapshot.motorsEnabled != mountStateSnapshot.motorsEnabled
+                           || snapshot.trackingEnabled != mountStateSnapshot.trackingEnabled
+                           || snapshot.stm32FirmwareVersion != mountStateSnapshot.stm32FirmwareVersion;
+        mountStateSnapshot = snapshot;
+        xSemaphoreGive(mountStateMutex);
+    }
+    if (shouldNotifyDisplay) {
+        notifyDisplayTask();
+    }
+}
+
+MountStateSnapshot getMountStateSnapshot() {
+    MountStateSnapshot snapshot = mountStateSnapshot;
+    if (mountStateMutex && xSemaphoreTake(mountStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        snapshot = mountStateSnapshot;
+        xSemaphoreGive(mountStateMutex);
+    }
+    return snapshot;
+}
+
+void publishCpuLoadSnapshot(uint8_t core0, uint8_t core1) {
+    bool changed = false;
+    if (cpuLoadMutex && xSemaphoreTake(cpuLoadMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        changed = core0 != cpuLoadSnapshot.core0 || core1 != cpuLoadSnapshot.core1;
+        cpuLoadSnapshot = {core0, core1};
+        xSemaphoreGive(cpuLoadMutex);
+    }
+    if (changed) {
+        notifyDisplayTask();
+    }
+}
+
+CpuLoadSnapshot getCpuLoadSnapshot() {
+    CpuLoadSnapshot snapshot = cpuLoadSnapshot;
+    if (cpuLoadMutex && xSemaphoreTake(cpuLoadMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        snapshot = cpuLoadSnapshot;
+        xSemaphoreGive(cpuLoadMutex);
+    }
+    return snapshot;
+}
+
 // =============================================================================
 //  Invio posizione corrente a Stellarium (pacchetto 24 byte)
 // =============================================================================
 void sendCurrentPosition(WiFiClient& client) {
     if (!client || !client.connected()) return;
 
-    uint32_t ra_raw  = (uint32_t)((currentRA_h    / 24.0) * 0xFFFFFFFFUL);
-    int32_t  dec_raw = (int32_t) ((currentDEC_deg / 90.0) * 0x3FFFFFFFL);
+    MountStateSnapshot state = getMountStateSnapshot();
+    uint32_t ra_raw  = (uint32_t)((state.ra_h    / 24.0) * 0xFFFFFFFFUL);
+    int32_t  dec_raw = (int32_t) ((state.dec_deg / 90.0) * 0x3FFFFFFFL);
 
     struct timeval tv;
     gettimeofday(&tv, nullptr);

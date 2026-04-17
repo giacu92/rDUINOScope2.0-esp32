@@ -47,13 +47,13 @@ Important ESP32 pin assignments are defined in `lib/Telescope/config.h`:
 | Modbus RX | 16 | ESP32 UART RX from STM32/RS485 side |
 | RS485 DE | 4 | Driver enable, active HIGH |
 | RGB LED | 48 | Onboard WS2812/NeoPixel status LED |
-| TFT SCLK | 12 | Provisional SPI clock for ILI9488 |
-| TFT MOSI | 11 | Provisional SPI MOSI for ILI9488/touch |
-| TFT MISO | 13 | Provisional SPI MISO for touch/display reads |
-| TFT CS | 10 | Provisional ILI9488 chip select |
-| TFT DC | 9 | Provisional ILI9488 data/command |
-| TFT RST | 14 | Provisional ILI9488 reset |
-| TFT BL | 21 | Provisional backlight PWM |
+| TFT SCLK | 10 | Provisional SPI clock for ILI9341/ILI9488 |
+| TFT MOSI | 11 | Provisional SPI MOSI for display/touch |
+| TFT MISO | 46 | Provisional SPI MISO for touch/display reads |
+| TFT CS | 14 | Provisional display chip select |
+| TFT DC | 12 | Provisional display data/command |
+| TFT RST | 13 | Provisional display reset |
+| TFT BL | 9 | Provisional backlight PWM |
 | Touch CS | 15 | Provisional XPT2046 chip select |
 | Touch IRQ | 18 | Provisional XPT2046 interrupt |
 
@@ -107,8 +107,10 @@ setWifiLedState(WIFI_LED_CAPTIVE_PORTAL);
 
 ## Display And Touch
 
-Milestone 1 starts the local UI layer with LovyanGFX driving an ILI9488 SPI
-display and XPT2046-compatible touch controller. The current implementation
+Milestone 1 starts the local UI layer with LovyanGFX driving an SPI TFT
+display and XPT2046-compatible touch controller. The current bench setup uses
+an ILI9341 panel; the intended larger UI can move back to ILI9488 by changing
+the LovyanGFX panel type and display geometry constants. The current firmware
 shows:
 
 - boot screen immediately after serial startup;
@@ -120,6 +122,20 @@ The display code lives in `lib/Display/display.h` and
 `lib/Display/display.cpp`. It is intentionally separate from the Stellarium and
 Modbus code so future screens can read state and emit high-level events without
 owning hardware services directly.
+
+After boot, `displayTask` is responsible for rendering screens when visible
+state changes. Setup may draw the early boot and
+initialization screens before the task starts; from the main screen onward,
+other code should publish state or enqueue high-level UI actions instead of
+drawing directly.
+
+Touch input has its own path. The XPT2046 IRQ wakes `touchTask`, and that task
+reads coordinates outside the interrupt handler. The ISR only notifies the task:
+it does not use SPI, LovyanGFX, logging, or UI logic. Because display and touch
+share the same SPI/LovyanGFX device, the public display functions are protected
+by a short mutex. The touch task also keeps a slow idle fallback check and, once
+a press is active, samples until release so future buttons can get stable press
+and release events.
 
 ## Stellarium Command Flow
 
@@ -225,12 +241,25 @@ State values mirror the STM32 firmware:
 
 The firmware keeps blocking or slower work away from the main TCP loop:
 
-- `loop()` handles Stellarium TCP traffic and periodic position packets.
-- `modbusTask` runs on core 1 and owns all Modbus communication.
-- `statusLedTask` runs at low priority and updates the RGB LED once per second.
+- Arduino `loop()` is pinned to core 1 by `CONFIG_ARDUINO_RUNNING_CORE=1` and
+  handles Stellarium TCP traffic plus periodic position packets.
+- `displayTask` runs on core 1 and renders screens when a refresh is needed.
+- `touchTask` runs on core 1, is woken by the XPT2046 IRQ, and reads touch
+  coordinates outside the ISR.
+- `modbusTask` runs on core 0 and owns all Modbus communication with the STM32.
+- `statusLedTask` runs on core 0 at low priority and updates the RGB LED state.
 
 GOTO commands are passed to the Modbus task through a FreeRTOS queue. This keeps
 the network path responsive while the STM32 is being polled for motion status.
+The Modbus task publishes a compact mount-state snapshot protected by a mutex;
+the TCP and display paths copy that snapshot briefly instead of reading live
+cross-core state directly.
+
+The main screen also shows an indicative per-core CPU load in the top-right
+header area. `cpuLoadTask` samples FreeRTOS idle hooks once per second and
+updates only that small display region, avoiding a full-screen redraw. The
+numbers are useful for balancing tasks across cores, but they are an idle-time
+estimate rather than a precise profiler.
 
 ## Configuration Points
 
@@ -274,7 +303,7 @@ The project uses:
 
 - `4-20ma/ModbusMaster` for Modbus RTU master communication.
 - `adafruit/Adafruit NeoPixel` for the onboard WS2812 status LED.
-- `lovyan03/LovyanGFX` for ILI9488 display and XPT2046 touch support.
+- `lovyan03/LovyanGFX` for SPI TFT display and XPT2046 touch support.
 - Arduino ESP32 `WiFi` and time APIs.
 
 Dependencies are declared in `platformio.ini`.
