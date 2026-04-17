@@ -1,3 +1,5 @@
+#pragma once
+
 #include <math.h>
 #include <stdio.h>
 #include <time.h>
@@ -7,7 +9,15 @@ enum class State : uint16_t {
     IDLE = 0,
     SLEWING = 1,
     TRACKING = 2,
-    ERROR = 3
+    ERROR = 3,
+    MOTORS_DISABLED = 4,
+    MANUAL_JOG = 5
+};
+
+enum class TrackingMode : uint16_t {
+    LUNAR = 0,
+    SIDEREAL = 1,
+    SOLAR = 2
 };
 
 class Telescope {
@@ -15,6 +25,10 @@ public:
     const char *fw_ver = "004 24 2026#";
 
     State status = State::IDLE;
+    uint16_t stm32FirmwareVersion = 0;
+    TrackingMode trackingMode = TrackingMode::SIDEREAL;
+    bool trackingEnabled = false;
+    bool motorsEnabled = true;
     double latitude;    // gradi decimali, Nord positivo
     double longitude;   // gradi decimali, Est positivo
     double ra;          // ore decimali [0,24)
