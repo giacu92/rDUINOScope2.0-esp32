@@ -32,6 +32,7 @@
 #include <Adafruit_NeoPixel.h>
 #include "telescope.h"
 #include "config.h"
+#include "display.h"
 
 // -----------------------------------------------------------------------------
 // Variabili globali
@@ -148,8 +149,17 @@ void setup() {
     delay(500);
     Serial.println("\n=== Stellarium GOTO Bridge – ESP32 rev2 ===");
 
+    if (!displayBegin()) {
+        Serial.println("[DISPLAY] LovyanGFX init failed; continuing headless.");
+    } else {
+        displayShowBootScreen();
+        delay(700);
+    }
+
+    displayShowInitScreen("Status LED", "Starting RGB indicator", 10);
     initStatusLed();
 
+    displayShowInitScreen("Mount link", "Starting Modbus RTU", 30);
     pinMode(RS485_DE_PIN, OUTPUT);
     digitalWrite(RS485_DE_PIN, LOW);
 
@@ -162,18 +172,30 @@ void setup() {
     mountCommandQueue = xQueueCreate(8, sizeof(MountCommand));
     xTaskCreatePinnedToCore(modbusTask, "modbus", 4096, nullptr, 1, nullptr, 1);
 
+    displayShowInitScreen("Network", "Connecting WiFi", 55);
     connectWiFi();
+
+    displayShowInitScreen("Time", "Synchronizing NTP", 70);
     syncNTP();
 
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
         telescope.setLX200Date(timeinfo);
     }
+    displayShowInitScreen("Mount status", "Reading STM32 firmware", 85);
     readSTM32FirmwareVersion();
 
     tcpServer.begin();
     tcpServer.setNoDelay(true);
+    displayShowInitScreen("TCP server", "Port 10003 ready", 95);
     Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
+
+    String ipAddress = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("-");
+    displayShowMainScreen(WiFi.status() == WL_CONNECTED ? "connected" : "offline",
+                          ipAddress.c_str(),
+                          telescope.stm32FirmwareVersion,
+                          telescope.motorsEnabled,
+                          telescope.trackingEnabled);
 }
 
 // Differenza minima tra due RA, considerando il wrap 0..24h.

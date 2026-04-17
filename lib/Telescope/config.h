@@ -12,8 +12,8 @@
 #define DEBUG_LX200_MODBUS  true
 
 // ── WiFi flags ────────────────────────────────────────────────────────────
-const char* WIFI_SSID     = secrets.getSSID();
-const char* WIFI_PASSWORD = secrets.getPassword();
+static const char* const WIFI_SSID     = secrets.getSSID();
+static const char* const WIFI_PASSWORD = secrets.getPassword();
 
 // ── Mechanical parameters ─────────────────────────────────────────────────
 constexpr uint16_t GEAR_TEETH      = 144;
@@ -32,7 +32,7 @@ const uint16_t STEL_PORT          = 10003;
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ── NTP flags ─────────────────────────────────────────────────────────────
-const char* NTP_SERVER            = "pool.ntp.org";
+static const char* const NTP_SERVER    = "pool.ntp.org";
 const long  GMT_OFFSET_SEC        =  3600;   // UTC+1 (ora solare)
 const int   DAYLIGHT_OFFSET_SEC   =  3600;   // ora legale
 
@@ -109,3 +109,27 @@ constexpr uint8_t RS485_DE_PIN  = 4;
 constexpr uint8_t RGB_LED_PIN        = 48;
 constexpr uint8_t RGB_LED_COUNT      = 1;
 constexpr uint8_t RGB_LED_BRIGHTNESS = 16;  // ~6% of 255
+
+// Milestone 1 display/touch pins.
+// These are provisional ESP32-S3 SPI pins and must match the final wiring.
+// GPIO 4 is intentionally avoided because it is already used by RS485_DE_PIN.
+constexpr uint8_t TFT_CS_PIN         = 14;
+constexpr uint8_t TFT_RST_PIN        = 13;
+constexpr uint8_t TFT_DC_PIN         = 12;
+constexpr uint8_t TFT_MOSI_PIN       = 11;
+constexpr uint8_t TFT_SCLK_PIN       = 10;
+constexpr uint8_t TFT_BACKLIGHT_PIN  = 9;
+constexpr uint8_t TFT_MISO_PIN       = 46;
+
+constexpr uint8_t TOUCH_CS_PIN       = 15;
+constexpr uint8_t TOUCH_IRQ_PIN      = 18;
+
+constexpr uint16_t TFT_WIDTH         = 240;
+constexpr uint16_t TFT_HEIGHT        = 320;
+constexpr uint8_t TFT_ROTATION       = 0;   // 0/2 portrait, 1/3 landscape
+constexpr uint8_t TFT_BRIGHTNESS     = 180; // 0..255
+
+constexpr uint16_t TOUCH_MIN_X       = 257;  // Legacy initial calibration
+constexpr uint16_t TOUCH_MAX_X       = 3900;
+constexpr uint16_t TOUCH_MIN_Y       = 445;
+constexpr uint16_t TOUCH_MAX_Y       = 3900;

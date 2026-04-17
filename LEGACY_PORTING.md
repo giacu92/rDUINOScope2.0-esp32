@@ -29,10 +29,12 @@ La repo attuale implementa soprattutto il bridge di comunicazione:
 - Sincronizzazione NTP.
 - Modbus RTU verso STM32 per inviare target RA/DEC e leggere stato/posizione.
 - LED RGB di stato.
+- Base display/touch Milestone 1 avviata con LovyanGFX: boot screen, init screen
+  e main screen statica.
 
-Non sono ancora presenti display grafico, touchscreen, cataloghi locali,
+Non sono ancora presenti navigazione touch completa, cataloghi locali,
 allineamento, sensori ambientali, GPS/RTC locali, storage offline cataloghi,
-menu utente, joystick, buzzer, ventole, night mode e log osservazioni.
+menu utente completo, joystick, buzzer, ventole, night mode e log osservazioni.
 
 ## Architettura da raggiungere
 
@@ -735,9 +737,11 @@ Per portare la ciccia serve aggiungere comandi/register per:
 
 ### Milestone 1: base display e touch
 
-- Aggiungere librerie display/touch a `platformio.ini`.
-- Definire pin in `config.h`.
-- Mostrare boot screen e main screen statico.
+- Aggiungere librerie display/touch a `platformio.ini`. Fatto con
+  `lovyan03/LovyanGFX`.
+- Definire pin in `config.h`. Fatto con pin provvisori da verificare sul
+  cablaggio finale.
+- Mostrare boot screen e main screen statico. Fatto; presente anche init screen.
 - Leggere touch e navigare tra main/options.
 - Backlight PWM e timeout.
 

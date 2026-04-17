@@ -47,8 +47,21 @@ Important ESP32 pin assignments are defined in `lib/Telescope/config.h`:
 | Modbus RX | 16 | ESP32 UART RX from STM32/RS485 side |
 | RS485 DE | 4 | Driver enable, active HIGH |
 | RGB LED | 48 | Onboard WS2812/NeoPixel status LED |
+| TFT SCLK | 12 | Provisional SPI clock for ILI9488 |
+| TFT MOSI | 11 | Provisional SPI MOSI for ILI9488/touch |
+| TFT MISO | 13 | Provisional SPI MISO for touch/display reads |
+| TFT CS | 10 | Provisional ILI9488 chip select |
+| TFT DC | 9 | Provisional ILI9488 data/command |
+| TFT RST | 14 | Provisional ILI9488 reset |
+| TFT BL | 21 | Provisional backlight PWM |
+| Touch CS | 15 | Provisional XPT2046 chip select |
+| Touch IRQ | 18 | Provisional XPT2046 interrupt |
 
 Modbus runs on `Serial2` at `57600` baud, using slave ID `1` on the STM32 side.
+
+The display/touch pins are Milestone 1 defaults and must be checked against the
+final wiring. GPIO 4 is intentionally avoided for touch chip select because it is
+already used by RS485 driver enable.
 
 ## WiFi and Time
 
@@ -91,6 +104,22 @@ When captive portal support is added, it can switch the indicator with:
 ```cpp
 setWifiLedState(WIFI_LED_CAPTIVE_PORTAL);
 ```
+
+## Display And Touch
+
+Milestone 1 starts the local UI layer with LovyanGFX driving an ILI9488 SPI
+display and XPT2046-compatible touch controller. The current implementation
+shows:
+
+- boot screen immediately after serial startup;
+- init screen while LED, Modbus, WiFi, NTP, STM32 status, and TCP server are
+  initialized;
+- static main screen with WiFi, IP, STM32 firmware, motors, and tracking state.
+
+The display code lives in `lib/Display/display.h` and
+`lib/Display/display.cpp`. It is intentionally separate from the Stellarium and
+Modbus code so future screens can read state and emit high-level events without
+owning hardware services directly.
 
 ## Stellarium Command Flow
 
@@ -245,6 +274,7 @@ The project uses:
 
 - `4-20ma/ModbusMaster` for Modbus RTU master communication.
 - `adafruit/Adafruit NeoPixel` for the onboard WS2812 status LED.
+- `lovyan03/LovyanGFX` for ILI9488 display and XPT2046 touch support.
 - Arduino ESP32 `WiFi` and time APIs.
 
 Dependencies are declared in `platformio.ini`.
