@@ -11,6 +11,15 @@
 #define DEBUG_LX200_FULL    false
 #define DEBUG_LX200_MODBUS  true
 
+// Simple serial runtime diagnostics for debug builds.
+#ifndef ENABLE_FREERTOS_TASK_STATS
+#define ENABLE_FREERTOS_TASK_STATS true
+#endif
+
+#ifndef FREERTOS_TASK_STATS_INTERVAL_MS
+#define FREERTOS_TASK_STATS_INTERVAL_MS 5000
+#endif
+
 // ── WiFi flags ────────────────────────────────────────────────────────────
 static const char* const WIFI_SSID     = secrets.getSSID();
 static const char* const WIFI_PASSWORD = secrets.getPassword();

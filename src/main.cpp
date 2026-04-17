@@ -31,8 +31,8 @@
 #include "telescope.h"
 #include "config.h"
 #include "display.h"
-#include "cpu_load.h"
 #include "mount_link.h"
+#include "system_stats.h"
 #include "touch_input.h"
 
 // -----------------------------------------------------------------------------
@@ -45,11 +45,12 @@ Adafruit_NeoPixel statusLed(RGB_LED_COUNT, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 Telescope telescope(LATITUDE_DEG, LONGITUDE_DEG);
 
-constexpr BaseType_t MODBUS_TASK_CORE = 0;
+constexpr BaseType_t MODBUS_TASK_CORE = 1;
 constexpr BaseType_t STATUS_LED_TASK_CORE = 0;
 constexpr BaseType_t DISPLAY_TASK_CORE = 1;
 constexpr BaseType_t TOUCH_TASK_CORE = 1;
 constexpr BaseType_t CPU_LOAD_TASK_CORE = 0;
+constexpr BaseType_t TASK_STATS_TASK_CORE = 0;
 
 // FIX [2]: target separato dalla posizione corrente
 double targetRA_h     = 0.0;
@@ -127,6 +128,7 @@ void setup() {
 
     mountLinkBegin(telescope, notifyDisplayTask);
     cpuLoadBegin(CPU_LOAD_TASK_CORE, notifyDisplayTask);
+    taskStatsBegin(TASK_STATS_TASK_CORE);
 
     displayShowInitScreen("Status LED", "Starting RGB indicator", 10);
     initStatusLed();

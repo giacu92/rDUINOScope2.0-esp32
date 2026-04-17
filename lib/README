@@ -1,46 +1,46 @@
+# Project Libraries
 
-This directory is intended for project specific (private) libraries.
-PlatformIO will compile them to static libraries and link into the executable file.
+This directory contains project-specific PlatformIO libraries used by the ESP32
+firmware.
 
-The source code of each library should be placed in a separate directory
-("lib/your_library_name/[Code]").
+## Display
 
-For example, see the structure of the following example libraries `Foo` and `Bar`:
+LovyanGFX display/touch hardware wrapper.
 
-|--lib
-|  |
-|  |--Bar
-|  |  |--docs
-|  |  |--examples
-|  |  |--src
-|  |     |- Bar.c
-|  |     |- Bar.h
-|  |  |- library.json (optional. for custom build options, etc) https://docs.platformio.org/page/librarymanager/config.html
-|  |
-|  |--Foo
-|  |  |- Foo.c
-|  |  |- Foo.h
-|  |
-|  |- README --> THIS FILE
-|
-|- platformio.ini
-|--src
-   |- main.c
+- Configures the SPI TFT panel, backlight PWM, and XPT2046 touch device.
+- Provides boot, initialization, and main-screen drawing helpers.
+- Protects display/touch access with a short mutex because both share SPI.
 
-Example contents of `src/main.c` using Foo and Bar:
-```
-#include <Foo.h>
-#include <Bar.h>
+## Input
 
-int main (void)
-{
-  ...
-}
+Local input handling.
 
-```
+- Owns the touch task.
+- Uses the XPT2046 IRQ only to wake the task.
+- Reads touch coordinates outside the ISR through the Display API.
 
-The PlatformIO Library Dependency Finder will find automatically dependent
-libraries by scanning project source files.
+## Mount
 
-More information about PlatformIO Library Dependency Finder
-- https://docs.platformio.org/page/librarymanager/ldf.html
+ESP32-to-STM32 mount link.
+
+- Owns `ModbusMaster`, RS485 direction control, and `Serial2` setup.
+- Owns the mount command queue and Modbus FreeRTOS task.
+- Polls STM32 status/position registers and publishes a mount-state snapshot.
+- Exposes high-level APIs such as GOTO, STOP, tracking, motors, and jog.
+
+## System
+
+Small system services.
+
+- Currently contains CPU load monitoring.
+- Samples FreeRTOS idle hooks once per second.
+- Provides per-core load snapshots for the display header.
+- Optionally prints serial runtime diagnostics.
+
+## Telescope
+
+Telescope protocol and configuration support.
+
+- Holds shared firmware configuration constants and pin assignments.
+- Provides the `Telescope` state/model used by LX200/Stellarium handling.
+- Includes local WiFi secrets integration through `secrets.h`.

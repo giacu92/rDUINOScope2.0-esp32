@@ -245,13 +245,22 @@ State values mirror the STM32 firmware:
 
 The firmware keeps blocking or slower work away from the main TCP loop:
 
-- Arduino `loop()` is pinned to core 1 by `CONFIG_ARDUINO_RUNNING_CORE=1` and
-  handles Stellarium TCP traffic plus periodic position packets.
-- `displayTask` runs on core 1 and renders screens when a refresh is needed.
-- `touchTask` runs on core 1, is woken by the XPT2046 IRQ, and reads touch
-  coordinates outside the ISR.
-- `modbusTask` runs on core 0 and owns all Modbus communication with the STM32.
-- `statusLedTask` runs on core 0 at low priority and updates the RGB LED state.
+| Task / service | Core | Owner | Notes |
+| :-- | :-- | :-- | :-- |
+| `loopTask` / Arduino `loop()` | 1 | Arduino | Handles Stellarium TCP traffic plus periodic position packets. Pinned by `CONFIG_ARDUINO_RUNNING_CORE=1`. |
+| `displayTask` | 1 | Project | Renders screens only when a refresh is needed. |
+| `touchTask` | 1 | Project | Woken by the XPT2046 IRQ, then reads touch coordinates outside the ISR. |
+| `modbusTask` | 0 | Project | Owns all Modbus communication with the STM32. |
+| `statusLedTask` | 0 | Project | Low-priority RGB LED state updates. |
+| `cpu_load` | 0 | Project | Samples FreeRTOS idle hooks once per second for the display CPU indicator. |
+| `task_stats` | 0 | Project | Optional serial debug report when `ENABLE_FREERTOS_TASK_STATS` is enabled. |
+| WiFi task | 0 | ESP-IDF | Pinned by `CONFIG_ESP32_WIFI_TASK_PINNED_TO_CORE_0=y`. |
+| `tcpip_task` / lwIP | 0 | ESP-IDF | Pinned by `CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y`. |
+| Arduino event task | 1 | Arduino | Pinned by `CONFIG_ARDUINO_EVENT_RUNNING_CORE=1`. |
+| Arduino UDP task | 0 | Arduino | Pinned by `CONFIG_ARDUINO_UDP_RUNNING_CORE=0`. |
+| Idle tasks | 0 and 1 | FreeRTOS | One idle task per core. Used by `cpu_load` for load estimation. |
+| FreeRTOS timer service | System | FreeRTOS | Present when timers are used; affinity is not explicitly pinned in this configuration. |
+| `esp_timer` internals | System | ESP-IDF | Used by ESP-IDF time/timer services; affinity is not explicitly pinned in this configuration. |
 
 GOTO commands are passed to the Modbus task through a FreeRTOS queue. This keeps
 the network path responsive while the STM32 is being polled for motion status.
@@ -271,9 +280,15 @@ updates only that small display region, avoiding a full-screen redraw. The
 numbers are useful for balancing tasks across cores, but they are an idle-time
 estimate rather than a precise profiler.
 
-CPU load monitoring lives in `lib/System/cpu_load.h` and
-`lib/System/cpu_load.cpp`. `src/main.cpp` only starts it with
-`cpuLoadBegin(...)` and reads the latest snapshot for rendering.
+CPU load monitoring lives in `lib/System/system_stats.h`. `src/main.cpp` only
+starts it with `cpuLoadBegin(...)` and reads the latest snapshot for rendering.
+
+For simple serial diagnostics, `ENABLE_FREERTOS_TASK_STATS` in `config.h` can
+enable a periodic debug report every `FREERTOS_TASK_STATS_INTERVAL_MS`
+milliseconds. The `task_stats` task, also defined in `system_stats.h`, prints
+per-core CPU load, the current task count, and heap usage. It intentionally
+avoids the heavier FreeRTOS runtime stats APIs because the prebuilt
+Arduino-ESP32 framework does not link them.
 
 ## Configuration Points
 
