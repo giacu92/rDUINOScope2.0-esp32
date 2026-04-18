@@ -113,9 +113,9 @@ panel; the intended larger UI can move back to ILI9488 by changing the
 LovyanGFX panel type and display geometry constants. The current firmware
 shows:
 
-- boot screen immediately after serial startup;
-- init screen while LED, Modbus, WiFi, NTP, STM32 status, and TCP server are
-  initialized;
+- boot diagnostics screen immediately after serial startup;
+- per-device initialization status rows for touch, WiFi, time, reserved GPS and
+  sensor slots, Modbus/STM32, and the TCP server;
 - static main screen with WiFi, IP, STM32 firmware, motors, and tracking state.
 
 The display hardware service lives in `lib/Display/display.h` and
@@ -128,6 +128,21 @@ day/night theme selection, reusable drawing helpers such as `drawHeader()`,
 `drawCpuLoad()`, and `drawBatteryLevel()`, and the current boot/init/main
 screen renderers. Rendering code should use `uiColors()` rather than defining
 local color constants.
+
+Complete screen operations are named `displayShow*()` and own the display lock.
+Shared `draw*()` helpers are internal drawing primitives; they receive an
+already locked LovyanGFX device and must not be called from application code.
+Boot diagnostics are updated through:
+
+```cpp
+displayBootSetStatus(row, "WiFi", BootStatus::Running);
+displayBootSetStatus(row, "WiFi", BootStatus::Ok);
+```
+
+Reserved rows can use `BootStatus::Skip` until their hardware module exists.
+The XPT2046 check is exposed as `displayProbeTouch()`. It verifies that the
+touch driver/SPI path can be initialized; XPT2046 does not provide a stable
+chip-ID register like many I2C sensors.
 
 After boot, `displayTask` is responsible for rendering screens when visible
 state changes. Setup may draw the early boot and
@@ -229,6 +244,11 @@ do not depend on short timed pulses.
 `REG_RES_STM32_FW_VERSION` stores the STM32 firmware version as `0xMMmm`, where
 the high byte is the major version and the low byte is the minor version. For
 example, `0x0200` means `2.0`.
+
+`mountLinkBegin()` reads `REG_RES_STM32_FW_VERSION` during startup and returns
+`true` only when the Modbus transaction succeeds and the value is not `0xFFFF`.
+The boot diagnostics use that result to mark the STM32/Modbus row as `OK` or
+`FAIL`. `0xFFFF` is treated as the disconnected/default bus value.
 
 `CMD_JOG_START` reads `REG_REQ_JOG_AXIS`, `REG_REQ_JOG_DIRECTION`, and
 `REG_REQ_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested

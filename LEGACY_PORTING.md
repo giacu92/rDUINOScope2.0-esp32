@@ -29,8 +29,8 @@ La repo attuale implementa soprattutto il bridge di comunicazione:
 - Sincronizzazione NTP.
 - Modbus RTU verso STM32 per inviare target RA/DEC e leggere stato/posizione.
 - LED RGB di stato.
-- Base display/touch Milestone 1 avviata con LovyanGFX: boot screen, init screen
-  e main screen statica.
+- Base display/touch Milestone 1 avviata con LovyanGFX: boot diagnostics,
+  init/main screen statiche e helper comuni per le schermate.
 
 Non sono ancora presenti navigazione touch completa, cataloghi locali,
 allineamento, sensori ambientali, GPS/RTC locali, storage offline cataloghi,
@@ -114,6 +114,10 @@ Schermate consigliate:
   motori, tracking, meridian flip.
 - Aggiungere una schermata `System` o `About` per WiFi/IP, firmware, OTA, SD,
   RTC, GPS, BME280, Modbus e diagnostica.
+- Il boot ESP32 ora usa `displayBootSetStatus()` per mostrare OK/FAIL/SKIP
+  riga per riga. `mountLinkBegin()` valida la presenza STM32 leggendo
+  `REG_RES_STM32_FW_VERSION`; `0xFFFF` viene trattato come valore da bus
+  scollegato.
 - Il pulsante `Controlla aggiornamenti` dovrebbe stare in `System`/`About`,
   oppure in una sezione chiaramente separata di `Options`.
 

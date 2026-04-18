@@ -95,7 +95,7 @@ TaskHandle_t displayTaskHandle = nullptr;
 // -----------------------------------------------------------------------------
 // Prototipi
 // -----------------------------------------------------------------------------
-void    connectWiFi();
+bool    connectWiFi();
 void    initStatusLed();
 void    setWifiLedState(WifiLedState state);
 void    renderStellariumConnectedLed();
@@ -118,6 +118,7 @@ void    sendCurrentPosition(WiFiClient& client);
 void setup() {
     Serial.begin(115200);
     delay(500);
+    initStatusLed();
     Serial.printf("\n=== %s ESP32 FW %02X.%02X ===\n",
                   ESP32_FIRMWARE_NAME,
                   (ESP32_FIRMWARE_VERSION >> 8) & 0xFF,
@@ -127,51 +128,90 @@ void setup() {
         Serial.println("[DISPLAY] LovyanGFX init failed; continuing headless.");
     } else {
         displayShowBootScreen();
-        displayBootSetStatus(0, "Display ILI9341", BootStatus::Ok);
+        //displayBootSetStatus(0, "Display ILI9341", BootStatus::Ok);
 
-        displayBootSetStatus(1, "Touchscreen XPT2046", BootStatus::Running);
-        displayBootSetStatus(1, "Touchscreen XPT2046", displayProbeTouch() ? BootStatus::Ok : BootStatus::Fail);
+        displayBootSetStatus(0, "Touchscreen XPT2046", BootStatus::Running);
+        displayBootSetStatus(0, "Touchscreen XPT2046", displayProbeTouch() ? BootStatus::Ok : BootStatus::Fail);
     }
 
-    displayBootSetStatus(3, "Mount link", BootStatus::Running);
-    mountLinkBegin(telescope, notifyDisplayTask);
-    displayBootSetStatus(3, "Mount link", BootStatus::Ok);
+    /*
+     * L'inizializzazione completa viene fatta in displayShowInitScreen() per mostrare lo stato di ogni step sul display.
+     * I passi principali sono:
+     *   1. Connessione WiFi
+     *   2. Sincronizzazione NTP e impostazione orologio
+     *   3. GPS, Sensori, RTC, SD Card (non implementati, ma riservati nello splash screen)
+     *   3. Avvio comunicazione con STM32 (MountLink)
+     *   4. Avvio server TCP Stellarium
+     *   5. Avvio task display e diagnostica
+     */
+    //displayBootSetStatus(0, "Touchscreen XPT2046", BootStatus::Pending);
+    //displayBootSetStatus(1, "WiFi", BootStatus::Pending);
+    //displayBootSetStatus(2, "Clock / NTP", BootStatus::Pending);
+    //displayBootSetStatus(3, "GPS", BootStatus::Pending);
+    //displayBootSetStatus(4, "BME280", BootStatus::Pending);
+    //displayBootSetStatus(5, "RTC", BootStatus::Pending);
+    //displayBootSetStatus(6, "SD Card", BootStatus::Pending);
+    //displayBootSetStatus(7, "Modbus (STM32F)", BootStatus::Pending);
+    //displayBootSetStatus(8, "TCP server", BootStatus::Pending);
+    //displayBootSetStatus(9, "Custom configs", BootStatus::Pending);
 
-    displayBootSetStatus(8, "Display tasks", BootStatus::Running);
-    cpuLoadBegin(CPU_LOAD_TASK_CORE, notifyDisplayTask);
-    taskStatsBegin(TASK_STATS_TASK_CORE);
+    displayBootSetStatus(1, "WiFi", BootStatus::Running);
+    displayBootSetStatus(1, "WiFi", connectWiFi() ? BootStatus::Ok : BootStatus::Fail);
 
-    displayBootSetStatus(2, "Status LED", BootStatus::Running);
-    initStatusLed();
-    displayBootSetStatus(2, "Status LED", BootStatus::Ok);
-
-    displayBootSetStatus(4, "WiFi", BootStatus::Running);
-    connectWiFi();
-    displayBootSetStatus(4, "WiFi", WiFi.status() == WL_CONNECTED ? BootStatus::Ok : BootStatus::Fail);
-
-    displayBootSetStatus(5, "Clock / NTP", BootStatus::Running);
+    displayBootSetStatus(2, "Clock / NTP", BootStatus::Running);
     syncNTP();
+
+    // GPS non implementato, ma riservato nello splash screen
+    displayBootSetStatus(3, "GPS", BootStatus::Skip);
+
+    // BME280 non implementato, ma riservato nello splash screen
+    displayBootSetStatus(4, "BME280", BootStatus::Skip);
+    
+    // RTC non implementato, ma riservato nello splash screen
+    displayBootSetStatus(5, "RTC", BootStatus::Skip);
+
+    // SD Card non implementato, ma riservato nello splash screen
+    displayBootSetStatus(6, "SD Card", BootStatus::Skip);
+    
+    // Init Mount Link (Modbus RTU verso STM32)
+    displayBootSetStatus(7, "Modbus (STM32F)", BootStatus::Running);
+    bool mountLinkReady = mountLinkBegin(telescope, notifyDisplayTask);
+    displayBootSetStatus(7, "Modbus (STM32F)", mountLinkReady ? BootStatus::Ok : BootStatus::Fail);  
+
+    mountLinkStartTask(MODBUS_TASK_CORE);
+
+    displayBootSetStatus(8, "TCP server", BootStatus::Running);
+    tcpServer.begin();
+    tcpServer.setNoDelay(true);
+    displayBootSetStatus(8, "TCP server", BootStatus::Ok);
+    Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
 
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
         telescope.setLX200Date(timeinfo);
-        displayBootSetStatus(5, "Clock / NTP", BootStatus::Ok);
+        displayBootSetStatus(2, "Clock / NTP", BootStatus::Ok);
     } else {
-        displayBootSetStatus(5, "Clock / NTP", BootStatus::Fail);
+        displayBootSetStatus(2, "Clock / NTP", BootStatus::Fail);
     }
 
-    displayBootSetStatus(6, "STM32 firmware", BootStatus::Running);
-    mountLinkReadSTM32FirmwareVersion();
-    displayBootSetStatus(6, "STM32 firmware", telescope.stm32FirmwareVersion ? BootStatus::Ok : BootStatus::Fail);
-    mountLinkStartTask(MODBUS_TASK_CORE);
+    // Custom configs non implementati, ma riservati nello splash screen
+    // Verranno salvate nella EEPROM e applicati da displayTask() dopo lo splash screen
+    /* Implementeremo la suddetta cosa usando Preferences.h: 
+        #include <Preferences.h>
+        Preferences prefs;
+        // Per esempio, per salvare la posizione:
+        prefs.begin("config", false);   // namespace "config", modalità lettura/scrittura
+        prefs.putDouble("latitude", 42.350);
 
-    displayBootSetStatus(7, "TCP server", BootStatus::Running);
-    tcpServer.begin();
-    tcpServer.setNoDelay(true);
-    displayBootSetStatus(7, "TCP server", BootStatus::Ok);
-    Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
+        // Per leggere la posizione all'avvio:
+        prefs.begin("config", true);    // namespace "config", modalità sola lettura
+        double latitude = prefs.getDouble("latitude", 42.350); // default 42.350 se non esiste
+    */
+    displayBootSetStatus(9, "Custom configs", BootStatus::Skip);
 
-    displayBootSetStatus(8, "Display tasks", BootStatus::Ok);
+    cpuLoadBegin(CPU_LOAD_TASK_CORE, notifyDisplayTask);
+    taskStatsBegin(TASK_STATS_TASK_CORE);
+
     delay(700);
 
     xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
@@ -353,17 +393,33 @@ void notifyDisplayTask() {
     }
 }
 
-void connectWiFi() {
+bool connectWiFi() {
+    constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
+
     setWifiLedState(WIFI_LED_DISCONNECTED);
     Serial.printf("Connessione a: %s", WIFI_SSID);
+    WiFi.disconnect(true, true);
+    delay(200);
     WiFi.mode(WIFI_STA);
 #if WIFI_DISABLE_SLEEP
     WiFi.setSleep(false);
 #endif
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+
+    uint32_t startMs = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startMs < WIFI_CONNECT_TIMEOUT_MS) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.printf("\n[WiFi] Connessione fallita, status=%d\n", WiFi.status());
+        return false;
+    }
+
     setWifiLedState(WIFI_LED_CONNECTED);
     Serial.printf("\nConnesso! IP: %s\n", WiFi.localIP().toString().c_str());
+    return true;
 }
 
 // =============================================================================

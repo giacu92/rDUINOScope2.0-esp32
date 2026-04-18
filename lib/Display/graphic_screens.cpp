@@ -209,7 +209,7 @@ uint16_t bootStatusColor(BootStatus status) {
 
 void drawBootStatusLine(lgfx::LGFX_Device& lcd, uint8_t row, const char* label, BootStatus status) {
     const UiPalette& c = uiColors();
-    const int y = 132 + (row * 18);
+    const int y = 132 + (row * 12);
     const int labelX = 18;
     const int statusX = lcd.width() - 18;
 
@@ -312,21 +312,23 @@ void displayShowBootScreen() {
     lcd->drawString("coded by <giacu92>", lcd->width() / 2, 34);
     //lcd->setFont(&fonts::DejaVu12);
     //lcd->drawString("Giacomo Mammarella", lcd->width() / 2, 52);
-    lcd->drawString("rduinoscope.byethost24.com", lcd->width() / 2, 60);
+    lcd->drawString("rduinoscope.byethost24.com", lcd->width() / 2, 58);
     String versionText = String("Version: v") + version + " - " + ESP32_FIRMWARE_NAME;
-    lcd->drawString(versionText, lcd->width() / 2, 76);
-    lcd->drawString(" (c) 2026 giacu92", lcd->width() / 2, 92);
-    lcd->drawString("GNU General Public License", lcd->width() / 2, 108);
+    lcd->drawString(versionText, lcd->width() / 2, 70);
+    lcd->drawString(" (c) 2026 giacu92", lcd->width() / 2, 82);
+    lcd->drawString("GNU General Public License", lcd->width() / 2, 94);
 
-    drawBootStatusLine(*lcd, 0, "Display ILI9341", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 1, "Touchscreen XPT2046", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 2, "Status LED", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 3, "Mount link", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 4, "WiFi", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 5, "Clock / NTP", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 6, "STM32 firmware", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 7, "TCP server", BootStatus::Pending);
-    drawBootStatusLine(*lcd, 8, "Display tasks", BootStatus::Pending);
+
+    drawBootStatusLine(*lcd, 0, "Touchscreen XPT2046", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 1, "WiFi", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 2, "Clock / NTP", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 3, "GPS", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 4, "BME280", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 5, "RTC", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 6, "SD Card", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 7, "Modbus (STM32F)", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 8, "TCP server", BootStatus::Pending);
+    drawBootStatusLine(*lcd, 9, "Custom configs", BootStatus::Pending);
     endScreenDraw();
 }
 #endif

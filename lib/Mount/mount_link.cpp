@@ -122,6 +122,27 @@ bool writeCommandRequest(uint16_t command) {
     return true;
 }
 
+bool readSTM32FirmwareVersion() {
+    if (!telescopeRef) return false;
+
+    uint8_t result = modbus.readHoldingRegisters(REG_RES_STM32_FW_VERSION, 1);
+    if (result != modbus.ku8MBSuccess) {
+        telescopeRef->stm32FirmwareVersion = 0xFFFF;
+        publishMountStateSnapshot();
+        if (DEBUG_LX200_FULL) {
+            Serial.printf("[Modbus] Errore lettura versione STM32: 0x%02X\n", result);
+        }
+        return false;
+    }
+
+    telescopeRef->stm32FirmwareVersion = modbus.getResponseBuffer(0);
+    publishMountStateSnapshot();
+    if (DEBUG_LX200_FULL) {
+        Serial.printf("[Modbus] STM32 FW=0x%04X\n", telescopeRef->stm32FirmwareVersion);
+    }
+    return telescopeRef->stm32FirmwareVersion != 0xFFFF;
+}
+
 void readPositionFromModbus() {
     if (!telescopeRef) return;
 
@@ -328,7 +349,7 @@ void modbusTask(void* pvParams) {
 
 } // namespace
 
-void mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStateChanged) {
+bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStateChanged) {
     telescopeRef = &telescope;
     changedCallback = onVisibleStateChanged;
     mountStateMutex = xSemaphoreCreateMutex();
@@ -342,7 +363,9 @@ void mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStat
     modbus.preTransmission(preTransmission);
     modbus.postTransmission(postTransmission);
 
+    bool stm32Ready = readSTM32FirmwareVersion();
     publishMountStateSnapshot();
+    return stm32Ready;
 }
 
 void mountLinkStartTask(BaseType_t taskCore) {
@@ -350,18 +373,7 @@ void mountLinkStartTask(BaseType_t taskCore) {
 }
 
 void mountLinkReadSTM32FirmwareVersion() {
-    if (!telescopeRef) return;
-
-    uint8_t result = modbus.readHoldingRegisters(REG_RES_STM32_FW_VERSION, 1);
-    if (result == modbus.ku8MBSuccess) {
-        telescopeRef->stm32FirmwareVersion = modbus.getResponseBuffer(0);
-        publishMountStateSnapshot();
-        if (DEBUG_LX200_FULL) {
-            Serial.printf("[Modbus] STM32 FW=0x%04X\n", telescopeRef->stm32FirmwareVersion);
-        }
-    } else if (DEBUG_LX200_FULL) {
-        Serial.printf("[Modbus] Errore lettura versione STM32: 0x%02X\n", result);
-    }
+    readSTM32FirmwareVersion();
 }
 
 MountLinkSnapshot mountLinkGetSnapshot() {

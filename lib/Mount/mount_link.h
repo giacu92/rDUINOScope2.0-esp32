@@ -17,7 +17,7 @@ struct MountLinkSnapshot {
 
 using MountLinkChangedCallback = void (*)();
 
-void mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStateChanged = nullptr);
+bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStateChanged = nullptr);
 void mountLinkStartTask(BaseType_t taskCore);
 void mountLinkReadSTM32FirmwareVersion();
 MountLinkSnapshot mountLinkGetSnapshot();

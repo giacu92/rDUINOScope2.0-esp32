@@ -12,12 +12,15 @@ Display hardware and graphical screen rendering.
 - Protects display/touch access with a short mutex because both share SPI.
 - Exposes touch reads, backlight control, and controlled access to the LovyanGFX
   device.
+- Exposes `displayProbeTouch()` for boot-time XPT2046 diagnostics.
 - Tracks the current backlight PWM duty value as an 8-bit brightness level
   from `0` to `255`.
 - `graphic_screens.h` / `graphic_screens.cpp` define the UI rendering layer.
 - Owns the shared UI palette, day/night theme selection, reusable drawing
   helpers, and the boot, initialization, main-screen, CPU-load, and battery
   renderers.
+- Exposes `displayBootSetStatus()` so setup can update boot diagnostics without
+  reaching into internal `draw*` helpers.
 
 ## Input
 
@@ -34,6 +37,8 @@ ESP32-to-STM32 mount link.
 - Owns `ModbusMaster`, RS485 direction control, and `Serial2` setup.
 - Owns the mount command queue and Modbus FreeRTOS task.
 - Polls STM32 status/position registers and publishes a mount-state snapshot.
+- `mountLinkBegin()` returns whether the STM32 answered the firmware-version
+  register with a valid value instead of the disconnected `0xFFFF` value.
 - Exposes high-level APIs such as GOTO, STOP, tracking, motors, and jog.
 
 ## System
