@@ -31,6 +31,7 @@
 #include "telescope.h"
 #include "config.h"
 #include "display.h"
+#include "graphic_screens.h"
 #include "mount_link.h"
 #include "system_stats.h"
 #include "touch_input.h"
@@ -117,42 +118,61 @@ void    sendCurrentPosition(WiFiClient& client);
 void setup() {
     Serial.begin(115200);
     delay(500);
-    Serial.println("\n=== Stellarium GOTO Bridge – ESP32 rev2 ===");
+    Serial.printf("\n=== %s ESP32 FW %02X.%02X ===\n",
+                  ESP32_FIRMWARE_NAME,
+                  (ESP32_FIRMWARE_VERSION >> 8) & 0xFF,
+                  ESP32_FIRMWARE_VERSION & 0xFF);
 
     if (!displayBegin()) {
         Serial.println("[DISPLAY] LovyanGFX init failed; continuing headless.");
     } else {
         displayShowBootScreen();
-        delay(700);
+        displayBootSetStatus(0, "Display ILI9341", BootStatus::Ok);
+
+        displayBootSetStatus(1, "Touchscreen XPT2046", BootStatus::Running);
+        displayBootSetStatus(1, "Touchscreen XPT2046", displayProbeTouch() ? BootStatus::Ok : BootStatus::Fail);
     }
 
+    displayBootSetStatus(3, "Mount link", BootStatus::Running);
     mountLinkBegin(telescope, notifyDisplayTask);
+    displayBootSetStatus(3, "Mount link", BootStatus::Ok);
+
+    displayBootSetStatus(8, "Display tasks", BootStatus::Running);
     cpuLoadBegin(CPU_LOAD_TASK_CORE, notifyDisplayTask);
     taskStatsBegin(TASK_STATS_TASK_CORE);
 
-    displayShowInitScreen("Status LED", "Starting RGB indicator", 10);
+    displayBootSetStatus(2, "Status LED", BootStatus::Running);
     initStatusLed();
+    displayBootSetStatus(2, "Status LED", BootStatus::Ok);
 
-    displayShowInitScreen("Mount link", "Starting Modbus RTU", 30);
-
-    displayShowInitScreen("Network", "Connecting WiFi", 55);
+    displayBootSetStatus(4, "WiFi", BootStatus::Running);
     connectWiFi();
+    displayBootSetStatus(4, "WiFi", WiFi.status() == WL_CONNECTED ? BootStatus::Ok : BootStatus::Fail);
 
-    displayShowInitScreen("Time", "Synchronizing NTP", 70);
+    displayBootSetStatus(5, "Clock / NTP", BootStatus::Running);
     syncNTP();
 
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
         telescope.setLX200Date(timeinfo);
+        displayBootSetStatus(5, "Clock / NTP", BootStatus::Ok);
+    } else {
+        displayBootSetStatus(5, "Clock / NTP", BootStatus::Fail);
     }
-    displayShowInitScreen("Mount status", "Reading STM32 firmware", 85);
+
+    displayBootSetStatus(6, "STM32 firmware", BootStatus::Running);
     mountLinkReadSTM32FirmwareVersion();
+    displayBootSetStatus(6, "STM32 firmware", telescope.stm32FirmwareVersion ? BootStatus::Ok : BootStatus::Fail);
     mountLinkStartTask(MODBUS_TASK_CORE);
 
+    displayBootSetStatus(7, "TCP server", BootStatus::Running);
     tcpServer.begin();
     tcpServer.setNoDelay(true);
-    displayShowInitScreen("TCP server", "Port 10003 ready", 95);
+    displayBootSetStatus(7, "TCP server", BootStatus::Ok);
     Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
+
+    displayBootSetStatus(8, "Display tasks", BootStatus::Ok);
+    delay(700);
 
     xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
     touchInputBegin(TOUCH_TASK_CORE);
@@ -336,6 +356,10 @@ void notifyDisplayTask() {
 void connectWiFi() {
     setWifiLedState(WIFI_LED_DISCONNECTED);
     Serial.printf("Connessione a: %s", WIFI_SSID);
+    WiFi.mode(WIFI_STA);
+#if WIFI_DISABLE_SLEEP
+    WiFi.setSleep(false);
+#endif
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
     setWifiLedState(WIFI_LED_CONNECTED);
@@ -677,10 +701,18 @@ void processLX200Command(const String &cmd) {
     }
 
     // --- PRODUCT NAME ---
-    else if (cmd.startsWith(":GVP#")) { sendResponse("rDuinoScope2.0#"); }
+    else if (cmd.startsWith(":GVP#")) {
+        snprintf(reply, sizeof(reply), "%s#", ESP32_FIRMWARE_NAME);
+        sendResponse(reply);
+    }
 
     // --- VERSION ---
-    else if (cmd.startsWith(":GVN#")) { sendResponse("02.0#"); }
+    else if (cmd.startsWith(":GVN#")) {
+        snprintf(reply, sizeof(reply), "%02X.%02X#",
+                 (ESP32_FIRMWARE_VERSION >> 8) & 0xFF,
+                 ESP32_FIRMWARE_VERSION & 0xFF);
+        sendResponse(reply);
+    }
 
     // --- FIRMWARE DATE  (formato LX200: "MMM DD YYYY#") ---
     else if (cmd.startsWith(":GVD#")) {

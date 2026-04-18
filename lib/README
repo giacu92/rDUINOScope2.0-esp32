@@ -5,11 +5,19 @@ firmware.
 
 ## Display
 
-LovyanGFX display/touch hardware wrapper.
+Display hardware and graphical screen rendering.
 
+- `display.h` / `display.cpp` define the `Display` hardware service.
 - Configures the SPI TFT panel, backlight PWM, and XPT2046 touch device.
-- Provides boot, initialization, and main-screen drawing helpers.
 - Protects display/touch access with a short mutex because both share SPI.
+- Exposes touch reads, backlight control, and controlled access to the LovyanGFX
+  device.
+- Tracks the current backlight PWM duty value as an 8-bit brightness level
+  from `0` to `255`.
+- `graphic_screens.h` / `graphic_screens.cpp` define the UI rendering layer.
+- Owns the shared UI palette, day/night theme selection, reusable drawing
+  helpers, and the boot, initialization, main-screen, CPU-load, and battery
+  renderers.
 
 ## Input
 

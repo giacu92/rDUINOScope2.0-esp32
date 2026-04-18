@@ -59,9 +59,9 @@ Important ESP32 pin assignments are defined in `lib/Telescope/config.h`:
 
 Modbus runs on `Serial2` at `57600` baud, using slave ID `1` on the STM32 side.
 
-The display/touch pins are Milestone 1 defaults and must be checked against the
-final wiring. GPIO 4 is intentionally avoided for touch chip select because it is
-already used by RS485 driver enable.
+The display/touch pins are current bench defaults and must be checked against
+the final wiring. GPIO 4 is intentionally avoided for touch chip select because
+it is already used by RS485 driver enable.
 
 ## WiFi and Time
 
@@ -107,10 +107,10 @@ setWifiLedState(WIFI_LED_CAPTIVE_PORTAL);
 
 ## Display And Touch
 
-Milestone 1 starts the local UI layer with LovyanGFX driving an SPI TFT
-display and XPT2046-compatible touch controller. The current bench setup uses
-an ILI9341 panel; the intended larger UI can move back to ILI9488 by changing
-the LovyanGFX panel type and display geometry constants. The current firmware
+The local UI layer uses LovyanGFX to drive an SPI TFT display and an
+XPT2046-compatible touch controller. The current bench setup uses an ILI9341
+panel; the intended larger UI can move back to ILI9488 by changing the
+LovyanGFX panel type and display geometry constants. The current firmware
 shows:
 
 - boot screen immediately after serial startup;
@@ -118,10 +118,16 @@ shows:
   initialized;
 - static main screen with WiFi, IP, STM32 firmware, motors, and tracking state.
 
-The display code lives in `lib/Display/display.h` and
-`lib/Display/display.cpp`. It is intentionally separate from the Stellarium and
-Modbus code so future screens can read state and emit high-level events without
-owning hardware services directly.
+The display hardware service lives in `lib/Display/display.h` and
+`lib/Display/display.cpp`. That module owns LovyanGFX initialization, panel and
+touch configuration, the display mutex, touch reads, and backlight control.
+
+Graphical screens live in `lib/Display/graphic_screens.h` and
+`lib/Display/graphic_screens.cpp`. That layer owns the shared UI palette,
+day/night theme selection, reusable drawing helpers such as `drawHeader()`,
+`drawCpuLoad()`, and `drawBatteryLevel()`, and the current boot/init/main
+screen renderers. Rendering code should use `uiColors()` rather than defining
+local color constants.
 
 After boot, `displayTask` is responsible for rendering screens when visible
 state changes. Setup may draw the early boot and
@@ -162,14 +168,13 @@ The STM32 owns the actual movement. It performs acceleration, deceleration,
 tracking transition, and error handling. The ESP32 polls the STM32 status and
 position registers, then reports the current position back to Stellarium.
 
-Milestone 0 extends the same boundary with high-level mount controls for the
-future local UI: tracking enable/mode, motors enable/disable, and manual jog.
-The ESP32 still does not generate motor pulses; it only writes intent into
-Modbus registers. Registers named `REG_REQ_*` are Modbus Master-side requests;
-registers named `REG_RES_*` are Modbus Slave-side responses. The one deliberate
-exception is `REG_REQ_COMMAND_PENDING`: ESP32 sets it to `1` after writing a
-command, and STM32 clears that pending flag back to `0` after consuming the
-command.
+The same boundary also carries high-level mount controls for the local UI:
+tracking enable/mode, motors enable/disable, and manual jog. The ESP32 still
+does not generate motor pulses; it only writes intent into Modbus registers.
+Registers named `REG_REQ_*` are Modbus Master-side requests; registers named
+`REG_RES_*` are Modbus Slave-side responses. The one deliberate exception is
+`REG_REQ_COMMAND_PENDING`: ESP32 sets it to `1` after writing a command, and
+STM32 clears that pending flag back to `0` after consuming the command.
 
 The STM32 firmware already defines `CMD_SYNC=3` and `CMD_FOLLOW_TARGET=4`; the
 ESP32 keeps those values reserved. Manual jog intentionally uses dedicated

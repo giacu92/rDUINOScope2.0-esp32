@@ -11,9 +11,18 @@
 #define DEBUG_LX200_FULL    false
 #define DEBUG_LX200_MODBUS  true
 
-// Simple serial runtime diagnostics for debug builds.
+// ESP32 firmware identity. Version is packed as 0xMMmm and printed as %02X.%02X.
+constexpr uint16_t ESP32_FIRMWARE_VERSION = 0xB001;
+static const char* const ESP32_FIRMWARE_NAME = "Alice EQ";
+
+// WiFi should prioritize latency and connection stability over modem sleep.
+#ifndef WIFI_DISABLE_SLEEP
+#define WIFI_DISABLE_SLEEP true
+#endif
+
+// Simple runtime diagnostics for debug builds.
 #ifndef ENABLE_FREERTOS_TASK_STATS
-#define ENABLE_FREERTOS_TASK_STATS true
+#define ENABLE_FREERTOS_TASK_STATS false
 #endif
 
 #ifndef FREERTOS_TASK_STATS_INTERVAL_MS
