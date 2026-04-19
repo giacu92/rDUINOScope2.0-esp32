@@ -60,4 +60,15 @@ Telescope protocol and configuration support.
 
 - Holds shared firmware configuration constants and pin assignments.
 - Provides the `Telescope` state/model used by LX200/Stellarium handling.
+- Owns the controller logical clock through `controllerTime`; LX200 date/time
+  accessors wrap that same clock so future DS3231 support has a single source
+  of truth.
 - Includes local WiFi secrets integration through `secrets.h`.
+
+## PlanetCalc
+
+Header-only approximate planetary position calculations.
+
+- `planetcalc.h` computes Sun, Moon, and planet RA/DEC plus auxiliary values
+  using Paul Schlyter-style orbital elements.
+- Intended for future local object/status calculations without dynamic memory.

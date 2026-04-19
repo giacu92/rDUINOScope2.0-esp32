@@ -24,8 +24,8 @@ session. Binary packets are treated as Stellarium Desktop traffic; text commands
 are handled by the LX200 parser.
 
 The ESP32 also keeps local telescope state for the client-facing protocol layer:
-current RA/DEC, target RA/DEC, site coordinates, LX200 date/time, and slewing
-state. Actual motor movement and tracking are delegated to the STM32.
+current RA/DEC, target RA/DEC, site coordinates, controller date/time, and
+slewing state. Actual motor movement and tracking are delegated to the STM32.
 
 ## Hardware Target
 
@@ -78,9 +78,12 @@ const long  GMT_OFFSET_SEC = 3600;
 const int   DAYLIGHT_OFFSET_SEC = 3600;
 ```
 
-The LX200 time model can also be updated by clients through date/time commands.
-When a client manually sets date or time, the firmware avoids overwriting it
-immediately with NTP-derived time.
+`Telescope` owns the controller's logical time as `controllerTime`. NTP and
+LX200 date/time commands both update that value, while the LX200 getters remain
+protocol wrappers around the same clock. When a client manually sets date or
+time, the firmware avoids overwriting the controller time immediately with
+NTP-derived time. A future DS3231 RTC service should read from and write to
+this controller clock rather than maintaining a separate LX200-only time model.
 
 ## Status LED
 

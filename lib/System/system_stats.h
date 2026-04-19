@@ -23,10 +23,13 @@ static constexpr uint8_t CPU_CORE_COUNT = portNUM_PROCESSORS;
 static SemaphoreHandle_t cpuLoadMutex = nullptr;
 static CpuLoadSnapshot cpuLoadSnapshot = {0, 0};
 static CpuLoadChangedCallback changedCallback = nullptr;
+#if ENABLE_CPU_LOAD_MONITOR
 static volatile uint32_t idleHookCounts[2] = {0, 0};
 static bool cpuLoadStarted = false;
+#endif
 static bool taskStatsStarted = false;
 
+#if ENABLE_CPU_LOAD_MONITOR
 static bool IRAM_ATTR cpuIdleHook0() {
     idleHookCounts[0]++;
     return true;
@@ -78,6 +81,7 @@ static void cpuLoadTask(void* pvParams) {
         publishCpuLoadSnapshot(load[0], load[1]);
     }
 }
+#endif
 
 static void printTaskStats() {
     CpuLoadSnapshot load = cpuLoadSnapshot;
@@ -110,6 +114,7 @@ static void taskStatsTask(void* pvParams) {
 } // namespace systemStats
 
 static void cpuLoadBegin(BaseType_t taskCore, CpuLoadChangedCallback onChanged = nullptr) {
+#if ENABLE_CPU_LOAD_MONITOR
     if (systemStats::cpuLoadStarted) return;
 
     systemStats::changedCallback = onChanged;
@@ -122,6 +127,10 @@ static void cpuLoadBegin(BaseType_t taskCore, CpuLoadChangedCallback onChanged =
     xTaskCreatePinnedToCore(systemStats::cpuLoadTask, "cpu_load", 2048, nullptr, 0, nullptr, taskCore);
 
     systemStats::cpuLoadStarted = true;
+#else
+    (void)taskCore;
+    (void)onChanged;
+#endif
 }
 
 static CpuLoadSnapshot cpuLoadGetSnapshot() {

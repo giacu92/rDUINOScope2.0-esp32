@@ -28,7 +28,7 @@ public:
     uint16_t stm32FirmwareVersion = 0;
     TrackingMode trackingMode = TrackingMode::SIDEREAL;
     bool trackingEnabled = false;
-    bool motorsEnabled = true;
+    bool motorsEnabled = false;
     double latitude;    // gradi decimali, Nord positivo
     double longitude;   // gradi decimali, Est positivo
     double ra;          // ore decimali [0,24)
@@ -44,7 +44,7 @@ public:
         initialTime.tm_year = 2026 - 1900;
         initialTime.tm_mon = 0;
         initialTime.tm_mday = 1;
-        setLX200DateTime(initialTime);
+        setControllerDateTime(initialTime);
     }
 
     // --- Normalizzazioni fondamentali ---
@@ -80,7 +80,15 @@ public:
     }
 
     bool getLX200DateTime(struct tm &out) {
-        time_t now = currentLX200Time();
+        return getControllerDateTime(out);
+    }
+
+    bool setLX200DateTime(const struct tm &t) {
+        return setControllerDateTime(t);
+    }
+
+    bool getControllerDateTime(struct tm &out) {
+        time_t now = currentControllerTime();
         struct tm *local = localtime(&now);
         if (!local) return false;
 
@@ -88,14 +96,22 @@ public:
         return true;
     }
 
-    bool setLX200DateTime(const struct tm &t) {
+    bool setControllerDateTime(const struct tm &t) {
         struct tm normalized = t;
         time_t epoch = mktime(&normalized);
+        return setControllerEpoch(epoch);
+    }
+
+    bool setControllerEpoch(time_t epoch) {
         if (epoch == (time_t)-1) return false;
 
-        lx200Time = epoch;
-        lx200TimeMillis = millis();
+        controllerTime = epoch;
+        controllerTimeMillis = millis();
         return true;
+    }
+
+    time_t currentControllerTime() const {
+        return controllerTime + (time_t)((millis() - controllerTimeMillis) / 1000UL);
     }
 
     void getLX200Date(char *out) {
@@ -190,12 +206,8 @@ public:
     }
 
 private:
-    time_t lx200Time = 0;
-    unsigned long lx200TimeMillis = 0;
-
-    time_t currentLX200Time() const {
-        return lx200Time + (time_t)((millis() - lx200TimeMillis) / 1000UL);
-    }
+    time_t controllerTime = 0;
+    unsigned long controllerTimeMillis = 0;
 
     double julianDay(int Y, int M, int D, int h, int m, int s) {
         if (M <= 2) { Y--; M += 12; }
@@ -241,7 +253,7 @@ private:
     double getLST_hours(double longitude_deg) {
 
     struct tm t;
-    if (!getLocalTime(&t)) {
+    if (!getControllerDateTime(t)) {
         return 0.0; // fallback
     }
 
