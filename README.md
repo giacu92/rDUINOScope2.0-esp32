@@ -47,6 +47,7 @@ Important ESP32 pin assignments are defined in `lib/Telescope/config.h`:
 | Modbus RX | 16 | ESP32 UART RX from STM32/RS485 side |
 | RS485 DE | 4 | Driver enable, active HIGH |
 | RGB LED | 48 | Onboard WS2812/NeoPixel status LED |
+| Night mode input | 8 | Active-low input with internal pull-up; GND forces night palette |
 | TFT SCLK | 10 | Provisional SPI clock for ILI9341/ILI9488 |
 | TFT MOSI | 11 | Provisional SPI MOSI for display/touch |
 | TFT MISO | 46 | Provisional SPI MISO for touch/display reads |
@@ -128,6 +129,14 @@ day/night theme selection, reusable drawing helpers such as `drawHeader()`,
 `drawCpuLoad()`, and `drawBatteryLevel()`, and the current boot/init/main
 screen renderers. Rendering code should use `uiColors()` rather than defining
 local color constants.
+
+Night mode can be forced by the `IS_NIGHT_MODE_PIN` digital input in
+`lib/Telescope/config.h`. The pin is configured as `INPUT_PULLUP`, so the
+default open/high state keeps the day palette; pulling it to GND selects the
+night palette. `system_inputs` samples this input once per second and requests
+a display refresh when the palette changes. The same task is the intended home
+for future slow board-level reads such as GPS, environmental sensors, and
+similar status inputs.
 
 Complete screen operations are named `displayShow*()` and own the display lock.
 Shared `draw*()` helpers are internal drawing primitives; they receive an
@@ -275,15 +284,16 @@ The firmware keeps blocking or slower work away from the main TCP loop:
 | `loopTask` / Arduino `loop()` | 1 | Arduino | Handles Stellarium TCP traffic plus periodic position packets. Pinned by `CONFIG_ARDUINO_RUNNING_CORE=1`. |
 | `displayTask` | 1 | Project | Renders screens only when a refresh is needed. |
 | `touchTask` | 1 | Project | Woken by the XPT2046 IRQ, then reads touch coordinates outside the ISR. |
-| `modbusTask` | 0 | Project | Owns all Modbus communication with the STM32. |
+| `modbusTask` | 1 | Project | Owns all Modbus communication with the STM32. |
 | `statusLedTask` | 0 | Project | Low-priority RGB LED state updates. |
-| `cpu_load` | 0 | Project | Samples FreeRTOS idle hooks once per second for the display CPU indicator. |
+| `system_inputs` | 0 | Project | Samples slow digital/system inputs once per second, currently the active-low night-mode pin. |
+| `cpu_load` | 0 | Project | Optional addon enabled with `ENABLE_CPU_LOAD_MONITOR`; samples FreeRTOS idle hooks for the display CPU indicator. |
 | `task_stats` | 0 | Project | Optional serial debug report when `ENABLE_FREERTOS_TASK_STATS` is enabled. |
 | WiFi task | 0 | ESP-IDF | Pinned by `CONFIG_ESP32_WIFI_TASK_PINNED_TO_CORE_0=y`. |
 | `tcpip_task` / lwIP | 0 | ESP-IDF | Pinned by `CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y`. |
 | Arduino event task | 1 | Arduino | Pinned by `CONFIG_ARDUINO_EVENT_RUNNING_CORE=1`. |
 | Arduino UDP task | 0 | Arduino | Pinned by `CONFIG_ARDUINO_UDP_RUNNING_CORE=0`. |
-| Idle tasks | 0 and 1 | FreeRTOS | One idle task per core. Used by `cpu_load` for load estimation. |
+| Idle tasks | 0 and 1 | FreeRTOS | One idle task per core. Used by `cpu_load` only when CPU load monitoring is enabled. |
 | FreeRTOS timer service | System | FreeRTOS | Present when timers are used; affinity is not explicitly pinned in this configuration. |
 | `esp_timer` internals | System | ESP-IDF | Used by ESP-IDF time/timer services; affinity is not explicitly pinned in this configuration. |
 
@@ -299,19 +309,23 @@ control, the command queue, STM32 polling, and the mount-state snapshot.
 `src/main.cpp` calls high-level APIs such as `mountLinkRequestGoto(...)` and
 `mountLinkRequestStop()` instead of touching Modbus registers directly.
 
-The main screen also shows an indicative per-core CPU load in the top-right
-header area. `cpuLoadTask` samples FreeRTOS idle hooks once per second and
+The main screen can optionally show an indicative per-core CPU load in the
+top-right header area. This is disabled by default with
+`ENABLE_CPU_LOAD_MONITOR=false` in `lib/Telescope/config.h`, so the firmware
+does not register FreeRTOS idle hooks and does not create the `cpu_load` task.
+When enabled, `cpuLoadTask` samples FreeRTOS idle hooks once per second and
 updates only that small display region, avoiding a full-screen redraw. The
 numbers are useful for balancing tasks across cores, but they are an idle-time
 estimate rather than a precise profiler.
 
-CPU load monitoring lives in `lib/System/system_stats.h`. `src/main.cpp` only
-starts it with `cpuLoadBegin(...)` and reads the latest snapshot for rendering.
+CPU load monitoring lives in `lib/System/system_stats.h`. `src/main.cpp` calls
+`cpuLoadBegin(...)`, which is a no-op while `ENABLE_CPU_LOAD_MONITOR` is false.
 
 For simple serial diagnostics, `ENABLE_FREERTOS_TASK_STATS` in `config.h` can
 enable a periodic debug report every `FREERTOS_TASK_STATS_INTERVAL_MS`
 milliseconds. The `task_stats` task, also defined in `system_stats.h`, prints
-per-core CPU load, the current task count, and heap usage. It intentionally
+the current task count and heap usage. If CPU load monitoring is enabled, the
+same report also includes the latest per-core load snapshot. It intentionally
 avoids the heavier FreeRTOS runtime stats APIs because the prebuilt
 Arduino-ESP32 framework does not link them.
 
@@ -321,10 +335,13 @@ Most project-level constants are in `lib/Telescope/config.h`:
 
 - WiFi credential access
 - Debug flags
+- Optional diagnostics such as `ENABLE_CPU_LOAD_MONITOR` and
+  `ENABLE_FREERTOS_TASK_STATS`
 - Site latitude and longitude
 - Stellarium TCP port and update interval
 - NTP server and timezone offsets
 - Modbus baud rate, slave ID, and ESP32 pins
+- Active-low night-mode input pin
 - Onboard RGB LED pin and brightness
 
 PlatformIO board and build options are in `platformio.ini`.

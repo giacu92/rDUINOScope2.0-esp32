@@ -52,6 +52,7 @@ constexpr BaseType_t DISPLAY_TASK_CORE = 1;
 constexpr BaseType_t TOUCH_TASK_CORE = 1;
 constexpr BaseType_t CPU_LOAD_TASK_CORE = 0;
 constexpr BaseType_t TASK_STATS_TASK_CORE = 0;
+constexpr BaseType_t SYSTEM_INPUTS_TASK_CORE = 0;
 
 // FIX [2]: target separato dalla posizione corrente
 double targetRA_h     = 0.0;
@@ -101,6 +102,10 @@ void    setWifiLedState(WifiLedState state);
 void    renderStellariumConnectedLed();
 void    updateWifiLedFromStatus();
 void    statusLedTask(void* pvParams);
+void    initSystemInputs();
+bool    readNightModeInput();
+void    applyNightModeInput(bool nightMode);
+void    systemInputsTask(void* pvParams);
 void    displayTask(void* pvParams);
 void    notifyDisplayTask();
 void    syncNTP();
@@ -119,20 +124,11 @@ void setup() {
     Serial.begin(115200);
     delay(500);
     initStatusLed();
+    initSystemInputs();
     Serial.printf("\n=== %s ESP32 FW %02X.%02X ===\n",
                   ESP32_FIRMWARE_NAME,
                   (ESP32_FIRMWARE_VERSION >> 8) & 0xFF,
                   ESP32_FIRMWARE_VERSION & 0xFF);
-
-    if (!displayBegin()) {
-        Serial.println("[DISPLAY] LovyanGFX init failed; continuing headless.");
-    } else {
-        displayShowBootScreen();
-        //displayBootSetStatus(0, "Display ILI9341", BootStatus::Ok);
-
-        displayBootSetStatus(0, "Touchscreen XPT2046", BootStatus::Running);
-        displayBootSetStatus(0, "Touchscreen XPT2046", displayProbeTouch() ? BootStatus::Ok : BootStatus::Fail);
-    }
 
     /*
      * L'inizializzazione completa viene fatta in displayShowInitScreen() per mostrare lo stato di ogni step sul display.
@@ -155,6 +151,18 @@ void setup() {
     //displayBootSetStatus(8, "TCP server", BootStatus::Pending);
     //displayBootSetStatus(9, "Custom configs", BootStatus::Pending);
 
+    bool isFatalError = false;
+    displayBootSetStatus(-1, "System booting", BootStatus::None);
+
+    if (!displayBegin()) {
+        Serial.println("[DISPLAY] LovyanGFX init failed; continuing headless.");
+        isFatalError = true;
+    } else {
+        displayShowBootScreen();
+        displayBootSetStatus(0, "Touchscreen XPT2046", BootStatus::Running);
+        displayBootSetStatus(0, "Touchscreen XPT2046", displayProbeTouch() ? BootStatus::Ok : BootStatus::Fail);
+    }
+
     displayBootSetStatus(1, "WiFi", BootStatus::Running);
     displayBootSetStatus(1, "WiFi", connectWiFi() ? BootStatus::Ok : BootStatus::Fail);
 
@@ -163,12 +171,27 @@ void setup() {
 
     // GPS non implementato, ma riservato nello splash screen
     displayBootSetStatus(3, "GPS", BootStatus::Skip);
+    bool gpsReady = true; 
+    //gpsReady = gpsInit();
+    isFatalError |= !gpsReady;
 
     // BME280 non implementato, ma riservato nello splash screen
     displayBootSetStatus(4, "BME280", BootStatus::Skip);
+    bool bmeReady = true;
+    //bmeReady = bmeInit();
+    if (!bmeReady) {
+        Serial.println("[WARN] BME280 init failed, continuing without environmental data.");
+        displayBootSetStatus(4, "BME280", BootStatus::Fail);
+    }
     
     // RTC non implementato, ma riservato nello splash screen
     displayBootSetStatus(5, "RTC", BootStatus::Skip);
+    bool rtcReady = true;
+    //rtcReady = rtcInit();
+    if (!rtcReady) {
+        Serial.println("[WARN] RTC init failed, continuing without real-time clock.");
+        displayBootSetStatus(5, "RTC", BootStatus::Fail);
+    }
 
     // SD Card non implementato, ma riservato nello splash screen
     displayBootSetStatus(6, "SD Card", BootStatus::Skip);
@@ -176,15 +199,21 @@ void setup() {
     // Init Mount Link (Modbus RTU verso STM32)
     displayBootSetStatus(7, "Modbus (STM32F)", BootStatus::Running);
     bool mountLinkReady = mountLinkBegin(telescope, notifyDisplayTask);
-    displayBootSetStatus(7, "Modbus (STM32F)", mountLinkReady ? BootStatus::Ok : BootStatus::Fail);  
-
-    mountLinkStartTask(MODBUS_TASK_CORE);
+    displayBootSetStatus(7, "Modbus (STM32F)", mountLinkReady ? BootStatus::Ok : BootStatus::Fail);
+    isFatalError |= !mountLinkReady;
+    if (mountLinkReady) {
+        mountLinkStartTask(MODBUS_TASK_CORE);
+    }
+    else {
+        Serial.println("[ERROR] STM32 MountLink init failed. Cannot continue.");
+        return;
+    }
 
     displayBootSetStatus(8, "TCP server", BootStatus::Running);
     tcpServer.begin();
     tcpServer.setNoDelay(true);
     displayBootSetStatus(8, "TCP server", BootStatus::Ok);
-    Serial.printf("Server TCP in ascolto sulla porta %d\n", STEL_PORT);
+    Serial.printf("[INFO] Server TCP in ascolto sulla porta %d\n", STEL_PORT);
 
     struct tm timeinfo;
     if (getLocalTime(&timeinfo)) {
@@ -209,10 +238,14 @@ void setup() {
     */
     displayBootSetStatus(9, "Custom configs", BootStatus::Skip);
 
+#if ENABLE_CPU_LOAD_MONITOR
     cpuLoadBegin(CPU_LOAD_TASK_CORE, notifyDisplayTask);
     taskStatsBegin(TASK_STATS_TASK_CORE);
+#endif
+    xTaskCreatePinnedToCore(systemInputsTask, "system_inputs", 2048, nullptr, 0, nullptr, SYSTEM_INPUTS_TASK_CORE);
 
     delay(700);
+    return;
 
     xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
     touchInputBegin(TOUCH_TASK_CORE);
@@ -328,6 +361,41 @@ void statusLedTask(void* pvParams) {
     }
 }
 
+void initSystemInputs() {
+    pinMode(IS_NIGHT_MODE_PIN, INPUT_PULLUP);
+    applyNightModeInput(readNightModeInput());
+}
+
+bool readNightModeInput() {
+    return digitalRead(IS_NIGHT_MODE_PIN) == LOW;
+}
+
+void applyNightModeInput(bool nightMode) {
+    if (displayIsNightMode() == nightMode) return;
+
+    displaySetNightMode(nightMode);
+    Serial.printf("[SYSTEM] Night mode %s (GPIO %u)\n",
+                  nightMode ? "enabled" : "disabled",
+                  IS_NIGHT_MODE_PIN);
+
+    if (displayTaskHandle) {
+        notifyDisplayTask();
+    } else if (display().isReady()) {
+        displayShowBootScreen();
+    }
+}
+
+void systemInputsTask(void* pvParams) {
+    (void)pvParams;
+
+    for (;;) {
+        applyNightModeInput(readNightModeInput());
+
+        // Future slow sensors and board-level inputs can be sampled here.
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 void displayTask(void* pvParams) {
     (void)pvParams;
 
@@ -343,18 +411,26 @@ void displayTask(void* pvParams) {
 
     DisplayViewState lastRendered = {};
     bool hasRendered = false;
+    bool lastNightMode = displayIsNightMode();
 
     for (;;) {
         MountLinkSnapshot state = mountLinkGetSnapshot();
+#if ENABLE_CPU_LOAD_MONITOR
         CpuLoadSnapshot cpuLoad = cpuLoadGetSnapshot();
+#endif
         DisplayViewState view = {
             WiFi.status() == WL_CONNECTED ? String("connected") : String("offline"),
             WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("-"),
             state.stm32FirmwareVersion,
             state.motorsEnabled,
             state.trackingEnabled,
+#if ENABLE_CPU_LOAD_MONITOR
             cpuLoad.core0,
             cpuLoad.core1
+#else
+            0,
+            0
+#endif
         };
 
         bool mainChanged = !hasRendered
@@ -362,10 +438,13 @@ void displayTask(void* pvParams) {
                         || view.ipAddress != lastRendered.ipAddress
                         || view.stm32FirmwareVersion != lastRendered.stm32FirmwareVersion
                         || view.motorsEnabled != lastRendered.motorsEnabled
-                        || view.trackingEnabled != lastRendered.trackingEnabled;
+                        || view.trackingEnabled != lastRendered.trackingEnabled
+                        || displayIsNightMode() != lastNightMode;
+#if ENABLE_CPU_LOAD_MONITOR
         bool cpuChanged = !hasRendered
                        || view.cpu0Load != lastRendered.cpu0Load
                        || view.cpu1Load != lastRendered.cpu1Load;
+#endif
 
         if (mainChanged) {
             displayShowMainScreen(view.wifiStatus.c_str(),
@@ -376,11 +455,14 @@ void displayTask(void* pvParams) {
                                   view.cpu0Load,
                                   view.cpu1Load);
             lastRendered = view;
+            lastNightMode = displayIsNightMode();
             hasRendered = true;
+#if ENABLE_CPU_LOAD_MONITOR
         } else if (cpuChanged) {
             displayShowCpuLoad(view.cpu0Load, view.cpu1Load);
             lastRendered.cpu0Load = view.cpu0Load;
             lastRendered.cpu1Load = view.cpu1Load;
+#endif
         }
 
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);

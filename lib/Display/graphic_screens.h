@@ -27,7 +27,8 @@ enum class BootStatus {
     Running,
     Ok,
     Fail,
-    Skip
+    Skip,
+    None
 };
 
 struct UiPalette {
@@ -79,7 +80,7 @@ bool displayIsNightMode();
 
 // Complete screen/paint operations. These functions own the display lock.
 void displayShowBootScreen();
-void displayBootSetStatus(uint8_t row, const char* label, BootStatus status);
+void displayBootSetStatus(int8_t row, const char* label, BootStatus status);
 void displayShowInitScreen(const char* step, const char* detail, uint8_t progress);
 void displayShowMainScreen(const char* wifiStatus,
                            const char* ipAddress,

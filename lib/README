@@ -17,8 +17,8 @@ Display hardware and graphical screen rendering.
   from `0` to `255`.
 - `graphic_screens.h` / `graphic_screens.cpp` define the UI rendering layer.
 - Owns the shared UI palette, day/night theme selection, reusable drawing
-  helpers, and the boot, initialization, main-screen, CPU-load, and battery
-  renderers.
+  helpers, and the boot, initialization, main-screen, optional CPU-load, and
+  battery renderers.
 - Exposes `displayBootSetStatus()` so setup can update boot diagnostics without
   reaching into internal `draw*` helpers.
 
@@ -45,9 +45,13 @@ ESP32-to-STM32 mount link.
 
 Small system services.
 
-- Currently contains CPU load monitoring.
-- Samples FreeRTOS idle hooks once per second.
-- Provides per-core load snapshots for the display header.
+- `system_inputs` is the 1 Hz task for slow board-level inputs.
+- Currently samples the active-low night-mode input and refreshes the display
+  palette when it changes.
+- Contains optional CPU load monitoring behind `ENABLE_CPU_LOAD_MONITOR`.
+- When enabled, samples FreeRTOS idle hooks once per second.
+- Provides per-core load snapshots for the display header only when the monitor
+  is enabled.
 - Optionally prints serial runtime diagnostics.
 
 ## Telescope

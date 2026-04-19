@@ -2,6 +2,10 @@
 
 #pragma once
 
+// ESP32 firmware identity. Version is packed as 0xMMmm and printed as %02X.%02X.
+constexpr uint16_t ESP32_FIRMWARE_VERSION = 0xB001;
+static const char* const ESP32_FIRMWARE_NAME = "Alice EQ";
+
 // ═══════════════════════════════════════════════════════════════════════════
 //  rDuinoScope 2.0 — ESP32-S3 User Configuration
 // ═══════════════════════════════════════════════════════════════════════════
@@ -11,9 +15,6 @@
 #define DEBUG_LX200_FULL    false
 #define DEBUG_LX200_MODBUS  true
 
-// ESP32 firmware identity. Version is packed as 0xMMmm and printed as %02X.%02X.
-constexpr uint16_t ESP32_FIRMWARE_VERSION = 0xB001;
-static const char* const ESP32_FIRMWARE_NAME = "Alice EQ";
 
 // WiFi should prioritize latency and connection stability over modem sleep.
 #ifndef WIFI_DISABLE_SLEEP
@@ -21,6 +22,10 @@ static const char* const ESP32_FIRMWARE_NAME = "Alice EQ";
 #endif
 
 // Simple runtime diagnostics for debug builds.
+#ifndef ENABLE_CPU_LOAD_MONITOR
+#define ENABLE_CPU_LOAD_MONITOR false
+#endif
+
 #ifndef ENABLE_FREERTOS_TASK_STATS
 #define ENABLE_FREERTOS_TASK_STATS false
 #endif
@@ -127,6 +132,10 @@ constexpr uint8_t RS485_DE_PIN  = 4;
 constexpr uint8_t RGB_LED_PIN        = 48;
 constexpr uint8_t RGB_LED_COUNT      = 1;
 constexpr uint8_t RGB_LED_BRIGHTNESS = 16;  // ~6% of 255
+
+// Active-low digital input. INPUT_PULLUP keeps day mode by default; pulling
+// this pin to GND forces the display night palette.
+constexpr uint8_t IS_NIGHT_MODE_PIN  = 8;
 
 // Milestone 1 display/touch pins.
 // These are provisional ESP32-S3 SPI pins and must match the final wiring.

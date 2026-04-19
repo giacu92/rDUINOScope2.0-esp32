@@ -190,7 +190,8 @@ const char* bootStatusText(BootStatus status) {
         case BootStatus::Running: return "...";
         case BootStatus::Ok:      return "OK";
         case BootStatus::Fail:    return "FAIL";
-        case BootStatus::Skip:    return "SKIP";
+        case BootStatus::Skip:    return "SKIPPED";
+        case BootStatus::None:    return "";
     }
     return "?";
 }
@@ -202,21 +203,24 @@ uint16_t bootStatusColor(BootStatus status) {
         case BootStatus::Running: return c.warning;
         case BootStatus::Ok:      return c.ok;
         case BootStatus::Fail:    return TFT_RED;
-        case BootStatus::Skip:    return c.muted;
+        case BootStatus::Skip:    return c.warning;
+        case BootStatus::None:    return c.background;
     }
     return c.muted;
 }
 
-void drawBootStatusLine(lgfx::LGFX_Device& lcd, uint8_t row, const char* label, BootStatus status) {
+void drawBootStatusLine(lgfx::LGFX_Device& lcd, int8_t row, const char* label, BootStatus status) {
     const UiPalette& c = uiColors();
-    const int y = 132 + (row * 12);
+    const int y = 132 + (row * 14);
     const int labelX = 18;
     const int statusX = lcd.width() - 18;
+    const bool isHeaderLine = status == BootStatus::None;
+    const uint16_t labelColor = isHeaderLine ? c.accent : c.text;
 
     lcd.fillRect(12, y - 8, lcd.width() - 24, 16, c.background);
     lcd.setFont(&fonts::DejaVu9);
     lcd.setTextDatum(textdatum_t::middle_left);
-    lcd.setTextColor(c.text, c.background);
+    lcd.setTextColor(labelColor, c.background);
     lcd.drawString(label ? label : "-", labelX, y);
 
     lcd.setTextDatum(textdatum_t::middle_right);
@@ -319,6 +323,7 @@ void displayShowBootScreen() {
     lcd->drawString("GNU General Public License", lcd->width() / 2, 94);
 
 
+    drawBootStatusLine(*lcd,-1, "System booting", BootStatus::None);
     drawBootStatusLine(*lcd, 0, "Touchscreen XPT2046", BootStatus::Pending);
     drawBootStatusLine(*lcd, 1, "WiFi", BootStatus::Pending);
     drawBootStatusLine(*lcd, 2, "Clock / NTP", BootStatus::Pending);
@@ -333,7 +338,7 @@ void displayShowBootScreen() {
 }
 #endif
 
-void displayBootSetStatus(uint8_t row, const char* label, BootStatus status) {
+void displayBootSetStatus(int8_t row, const char* label, BootStatus status) {
     lgfx::LGFX_Device* lcd = nullptr;
     if (!beginScreenDraw(lcd)) return;
 
