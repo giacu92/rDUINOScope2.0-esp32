@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "telescope.h"
+
 enum class ScreenType {
     GPS = 0,
     Clock = 1,
@@ -82,11 +84,13 @@ bool displayIsNightMode();
 void displayShowBootScreen();
 void displayBootSetStatus(int8_t row, const char* label, BootStatus status);
 void displayShowInitScreen(const char* step, const char* detail, uint8_t progress);
-void displayShowMainScreen(const char* wifiStatus,
+void displayShowMainScreen(bool wifiConnected,
+                           bool stellariumConnected,
                            const char* ipAddress,
                            uint16_t stm32FirmwareVersion,
+                           bool soundEnabled,
                            bool motorsEnabled,
-                           bool trackingEnabled,
+                           State mountStatus,
                            uint8_t cpu0Load,
                            uint8_t cpu1Load);
 void displayShowCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load);

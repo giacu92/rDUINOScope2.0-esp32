@@ -5,3 +5,5 @@
 .vscode/ipch
 lib/Telescope/secrets.h
 fonts.md
+graphics/**/*.png
+graphics/icon.inc

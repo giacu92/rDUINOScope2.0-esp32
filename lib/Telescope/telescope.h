@@ -47,15 +47,6 @@ public:
         setControllerDateTime(initialTime);
     }
 
-    // --- Normalizzazioni fondamentali ---
-    void normalize() {
-        ra = fmod(ra, 24.0);
-        if (ra < 0) ra += 24.0;
-
-        if (dec > 90.0) dec = 90.0;
-        if (dec < -90.0) dec = -90.0;
-    }
-
     // :GVF# -> "fw_ver"
     void getLX200FwDate(char *out) {
         strcpy(out, fw_ver);
@@ -114,6 +105,10 @@ public:
         return controllerTime + (time_t)((millis() - controllerTimeMillis) / 1000UL);
     }
 
+    double getLocalSiderealTimeHours() {
+        return getLSTHours(longitude);
+    }
+
     void getLX200Date(char *out) {
         struct tm t;
         getLX200DateTime(t);
@@ -163,6 +158,7 @@ public:
 
     // :GR# -> HH:MM:SS#
     void getLX200RA(char *out) {
+        normalize();
         double totalSeconds = ra * 3600.0;
 
         int h = (int)(totalSeconds / 3600);
@@ -180,6 +176,7 @@ public:
 
     // :GD# -> sDD*MM'SS#
     void getLX200Dec(char *out) {
+        normalize();
         char sign = (dec >= 0) ? '+' : '-';
         double absDec = fabs(dec);
 
@@ -209,6 +206,15 @@ private:
     time_t controllerTime = 0;
     unsigned long controllerTimeMillis = 0;
 
+    // --- Normalizzazioni fondamentali ---
+    void normalize() {
+        ra = fmod(ra, 24.0);
+        if (ra < 0) ra += 24.0;
+
+        if (dec > 90.0) dec = 90.0;
+        if (dec < -90.0) dec = -90.0;
+    }
+
     double julianDay(int Y, int M, int D, int h, int m, int s) {
         if (M <= 2) { Y--; M += 12; }
 
@@ -237,8 +243,8 @@ private:
         return GMST; // gradi
     }
 
-    double lst(double gmst_deg, double longitude_deg) {
-        double LST = gmst_deg + longitude_deg;
+    double lst(double gmstDeg, double longitudeDeg) {
+        double LST = gmstDeg + longitudeDeg;
 
         LST = fmod(LST, 360.0);
         if (LST < 0) LST += 360.0;
@@ -246,11 +252,11 @@ private:
         return LST;
     }
     
-    double lstHours(double lst_deg) {
-        return lst_deg / 15.0;
+    double lstHours(double lstDeg) {
+        return lstDeg / 15.0;
     }
 
-    double getLST_hours(double longitude_deg) {
+    double getLSTHours(double longitudeDeg) {
 
     struct tm t;
     if (!getControllerDateTime(t)) {
@@ -267,12 +273,7 @@ private:
         );
 
         double GMST = gmst(JD);
-        double LST_deg = GMST + longitude_deg;
-
-        LST_deg = fmod(LST_deg, 360.0);
-        if (LST_deg < 0) LST_deg += 360.0;
-
-        return LST_deg / 15.0;
+        return lstHours(lst(GMST, longitudeDeg));
     }
 
 };

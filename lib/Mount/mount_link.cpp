@@ -67,7 +67,9 @@ void publishMountStateSnapshot() {
 
     bool shouldNotifyDisplay = false;
     if (xSemaphoreTake(mountStateMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        shouldNotifyDisplay = snapshot.motorsEnabled != mountStateSnapshot.motorsEnabled
+        shouldNotifyDisplay = snapshot.status != mountStateSnapshot.status
+                           || snapshot.isSlewing != mountStateSnapshot.isSlewing
+                           || snapshot.motorsEnabled != mountStateSnapshot.motorsEnabled
                            || snapshot.trackingEnabled != mountStateSnapshot.trackingEnabled
                            || snapshot.stm32FirmwareVersion != mountStateSnapshot.stm32FirmwareVersion;
         mountStateSnapshot = snapshot;
@@ -160,6 +162,7 @@ void readPositionFromModbus() {
         telescopeRef->ra = currentRA_h;
         telescopeRef->dec = currentDEC_deg;
         telescopeRef->isSlewing = (telescopeRef->status == State::SLEWING);
+        telescopeRef->trackingEnabled = (telescopeRef->status == State::TRACKING);
         publishMountStateSnapshot();
 
         if (DEBUG_LX200_FULL) {
@@ -267,6 +270,7 @@ void modbusTask(void* pvParams) {
                 if (DEBUG_LX200_MODBUS) {
                     Serial.printf("[Modbus] Errore scrittura: 0x%02X\n", result);
                 }
+                telescopeRef->status = State::IDLE;
                 telescopeRef->setSlewing(false);
                 publishMountStateSnapshot();
                 continue;
@@ -277,6 +281,7 @@ void modbusTask(void* pvParams) {
                 if (DEBUG_LX200_MODBUS) {
                     Serial.printf("[Modbus] Errore pending GOTO: 0x%02X\n", pendingResult);
                 }
+                telescopeRef->status = State::IDLE;
                 telescopeRef->setSlewing(false);
                 publishMountStateSnapshot();
                 continue;
@@ -299,6 +304,7 @@ void modbusTask(void* pvParams) {
                         if (DEBUG_LX200_MODBUS) {
                             Serial.println("[Modbus] GOTO completato, tracking attivo.");
                         }
+                        telescopeRef->status = State::TRACKING;
                         telescopeRef->setSlewing(false);
                         publishMountStateSnapshot();
                         gotoFinished = true;
@@ -313,6 +319,7 @@ void modbusTask(void* pvParams) {
                     if (DEBUG_LX200_MODBUS) {
                         Serial.println("[Modbus] STM32 ha riportato errore GOTO.");
                     }
+                    telescopeRef->status = State::ERROR;
                     telescopeRef->setSlewing(false);
                     publishMountStateSnapshot();
                     gotoFinished = true;
@@ -322,6 +329,7 @@ void modbusTask(void* pvParams) {
                         if (DEBUG_LX200_MODBUS) {
                             Serial.println("[Modbus] STM32 IDLE durante GOTO, uscita.");
                         }
+                        telescopeRef->status = State::IDLE;
                         telescopeRef->setSlewing(false);
                         publishMountStateSnapshot();
                         gotoFinished = true;
@@ -334,6 +342,7 @@ void modbusTask(void* pvParams) {
                 if (DEBUG_LX200_MODBUS) {
                     Serial.println("[Modbus] Timeout polling STM32.");
                 }
+                telescopeRef->status = State::IDLE;
                 telescopeRef->setSlewing(false);
                 publishMountStateSnapshot();
             }
@@ -364,8 +373,18 @@ bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStat
     modbus.postTransmission(postTransmission);
 
     bool stm32Ready = readSTM32FirmwareVersion();
+    bool stopped = false;
+    if (stm32Ready) {
+        stopped = writeCommandRequest(CMD_STOP);
+        if (stopped) {
+            telescopeRef->status = State::IDLE;
+            telescopeRef->setSlewing(false);
+        } else if (DEBUG_LX200_MODBUS) {
+            Serial.println("[Modbus] Errore invio STOP iniziale.");
+        }
+    }
     publishMountStateSnapshot();
-    return stm32Ready;
+    return stm32Ready && stopped;
 }
 
 void mountLinkStartTask(BaseType_t taskCore) {
@@ -396,6 +415,7 @@ bool mountLinkRequestGoto(double targetRA_h, double targetDEC_deg) {
                       targetRA_h, targetDEC_deg, (long)ra_arcsec100, (long)dec_arcsec100);
     }
 
+    telescopeRef->status = State::SLEWING;
     telescopeRef->setSlewing(true);
 
     MountCommand cmd = {MountCommandType::GOTO, ra_arcsec100, dec_arcsec100, 0, 0, 0};
@@ -403,6 +423,7 @@ bool mountLinkRequestGoto(double targetRA_h, double targetDEC_deg) {
         if (DEBUG_LX200) {
             Serial.println("[WARN] Coda GOTO piena, comando scartato.");
         }
+        telescopeRef->status = State::IDLE;
         telescopeRef->setSlewing(false);
         publishMountStateSnapshot();
         return false;
@@ -415,6 +436,7 @@ bool mountLinkRequestStop() {
     if (!telescopeRef) return false;
 
     MountCommand cmd = {MountCommandType::STOP, 0, 0, 0, 0, 0};
+    telescopeRef->status = State::IDLE;
     telescopeRef->setSlewing(false);
     publishMountStateSnapshot();
     return enqueueMountCommand(cmd);

@@ -2,6 +2,7 @@
 #include <LovyanGFX.hpp>
 #include "display.h"
 #include "config.h"
+#include "icons.h"
 
 namespace {
 
@@ -98,20 +99,27 @@ void drawLegacyHeader(lgfx::LGFX_Device& lcd) {
     const UiPalette& c = uiColors();
 
     lcd.fillRect(0, 1, lcd.width(), 90, c.titleBackground);
-    lcd.drawLine(0, 27, lcd.width(), 27, c.accent);
+    lcd.drawLine(0, 27, lcd.width(), 27, c.background);
     lcd.drawLine(0, 92, lcd.width(), 92, c.titleBackground);
 
     lcd.setTextSize(1);
     lcd.setTextColor(c.titleText, c.buttonTitle);
 }
 
+void drawPngIcon(lgfx::LGFX_Device& lcd, uint8_t x, uint8_t y, const uint8_t* icon, size_t iconSize) {
+    const UiPalette& c = uiColors();
+    lcd.fillRect(x, y, 20, 20, c.titleBackground);
+    lcd.drawPng(icon, iconSize, x, y);
+}
+
 void drawStatusBar(lgfx::LGFX_Device& lcd) {
     const UiPalette& c = uiColors();
 
     lcd.fillRect(0, 1, lcd.width(), 26, c.titleBackground);
-    lcd.setFont(&fonts::Font0);
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextDatum(textdatum_t::top_left);
     lcd.setTextSize(1);
-    lcd.setTextColor(c.stateOff);
+    lcd.setTextColor(c.titleText);
 
     // Brightness
     lcd.setCursor(3, 4);
@@ -123,16 +131,6 @@ void drawStatusBar(lgfx::LGFX_Device& lcd) {
     // T-out
     lcd.setCursor(47, 4);
     lcd.print("T-out");
-
-    lcd.setCursor(85, 4);
-    lcd.print("Sound");
-    lcd.setCursor(85, 15);
-    lcd.print("OFF");
-  
-    lcd.setCursor(125, 4);
-    lcd.print("Motors");
-    lcd.setCursor(125, 15);
-    lcd.print("OFF");
 }
 
 void drawBatteryLevel(lgfx::LGFX_Device& lcd, uint8_t x, uint8_t y, int level) {
@@ -154,8 +152,49 @@ void drawBatteryLevel(lgfx::LGFX_Device& lcd, uint8_t x, uint8_t y, int level) {
     }
 }
 
-void drawStatusBarWithBattery(lgfx::LGFX_Device& lcd, int batteryLevel) {
+void drawStellariumIcon(lgfx::LGFX_Device& lcd, uint8_t x, uint8_t y, bool connected) {
+    const uint8_t* icon = connected
+        ? display_assets::STELLARIUM_ICON_20P_PNG
+        : display_assets::STELLARIUM_ICON_20P_GRAY;
+    const size_t iconSize = connected
+        ? display_assets::STELLARIUM_ICON_20P_PNG_SIZE
+        : display_assets::STELLARIUM_ICON_20P_GRAY_SIZE;
+
+    drawPngIcon(lcd, x, y, icon, iconSize);
+}
+
+void drawWifiIcon(lgfx::LGFX_Device& lcd, uint8_t x, uint8_t y, bool connected) {
+    const uint8_t* icon = connected
+        ? display_assets::WIFI_ICON_20P
+        : display_assets::NOWIFI_ICON_20P;
+    const size_t iconSize = connected
+        ? display_assets::WIFI_ICON_20P_SIZE
+        : display_assets::NOWIFI_ICON_20P_SIZE;
+
+    drawPngIcon(lcd, x, y, icon, iconSize);
+}
+
+void drawSpeakerIcon(lgfx::LGFX_Device& lcd, uint8_t x, uint8_t y, bool enabled) {
+    const uint8_t* icon = enabled
+        ? display_assets::SPEAKER_ICON_20P
+        : display_assets::SPEAKER_MUTE_ICON_20P;
+    const size_t iconSize = enabled
+        ? display_assets::SPEAKER_ICON_20P_SIZE
+        : display_assets::SPEAKER_MUTE_ICON_20P_SIZE;
+
+    drawPngIcon(lcd, x, y, icon, iconSize);
+}
+
+void drawStatusBarWithBattery(lgfx::LGFX_Device& lcd,
+                              int batteryLevel,
+                              bool soundEnabled,
+                              bool motorsEnabled,
+                              bool wifiConnected,
+                              bool stellariumConnected) {
     drawStatusBar(lcd);
+    drawSpeakerIcon(lcd, lcd.width() - 126, 4, soundEnabled);
+    drawStellariumIcon(lcd, lcd.width() - 78, 4, stellariumConnected);
+    drawWifiIcon(lcd, lcd.width() - 54, 4, wifiConnected);
     drawBatteryLevel(lcd, lcd.width() - 30, 4, batteryLevel);
 }
 
@@ -205,6 +244,31 @@ uint16_t bootStatusColor(BootStatus status) {
         case BootStatus::Fail:    return TFT_RED;
         case BootStatus::Skip:    return c.warning;
         case BootStatus::None:    return c.background;
+    }
+    return c.muted;
+}
+
+const char* mountStatusText(State status) {
+    switch (status) {
+        case State::IDLE:            return "IDLE";
+        case State::SLEWING:         return "SLEWING";
+        case State::TRACKING:        return "TRACKING";
+        case State::ERROR:           return "ERROR";
+        case State::MOTORS_DISABLED: return "MOTORS OFF";
+        case State::MANUAL_JOG:      return "JOG";
+    }
+    return "UNKNOWN";
+}
+
+uint16_t mountStatusColor(State status) {
+    const UiPalette& c = uiColors();
+    switch (status) {
+        case State::TRACKING:        return c.ok;
+        case State::SLEWING:         return c.warning;
+        case State::MANUAL_JOG:      return c.warning;
+        case State::ERROR:           return TFT_RED;
+        case State::MOTORS_DISABLED: return c.warning;
+        case State::IDLE:            return c.muted;
     }
     return c.muted;
 }
@@ -317,7 +381,8 @@ void displayShowBootScreen() {
     //lcd->setFont(&fonts::DejaVu12);
     //lcd->drawString("Giacomo Mammarella", lcd->width() / 2, 52);
     lcd->drawString("rduinoscope.byethost24.com", lcd->width() / 2, 58);
-    String versionText = String("Version: v") + version + " - " + ESP32_FIRMWARE_NAME;
+    char versionText[48];
+    snprintf(versionText, sizeof(versionText), "Version: v%s - %s", version, ESP32_FIRMWARE_NAME);
     lcd->drawString(versionText, lcd->width() / 2, 70);
     lcd->drawString(" (c) 2026 giacu92", lcd->width() / 2, 82);
     lcd->drawString("GNU General Public License", lcd->width() / 2, 94);
@@ -373,11 +438,13 @@ void displayShowInitScreen(const char* step, const char* detail, uint8_t progres
     endScreenDraw();
 }
 
-void displayShowMainScreen(const char* wifiStatus,
+void displayShowMainScreen(bool wifiConnected,
+                           bool stellariumConnected,
                            const char* ipAddress,
                            uint16_t stm32FirmwareVersion,
+                           bool soundEnabled,
                            bool motorsEnabled,
-                           bool trackingEnabled,
+                           State mountStatus,
                            uint8_t cpu0Load,
     uint8_t cpu1Load) {
     lgfx::LGFX_Device* lcd = nullptr;
@@ -392,18 +459,12 @@ void displayShowMainScreen(const char* wifiStatus,
     lcd->fillScreen(c.background);
 
     drawLegacyHeader(*lcd);
-    drawStatusBarWithBattery(*lcd, -1);
+    drawStatusBarWithBattery(*lcd, -1, soundEnabled, motorsEnabled, wifiConnected, stellariumConnected);
 
-    lcd->setTextDatum(textdatum_t::middle_left);
-    lcd->setFont(&fonts::Font4);
-    lcd->setTextColor(c.text, c.background);
-    lcd->drawString("Ready", 18, 45);
-
-    drawStatusLine(*lcd, 72, "WiFi", wifiStatus ? wifiStatus : "unknown", c.ok);
-    drawStatusLine(*lcd, 104, "IP", ipAddress ? ipAddress : "-", c.text);
-    drawStatusLine(*lcd, 136, "STM32 FW", version, stm32FirmwareVersion ? c.ok : c.warning);
-    drawStatusLine(*lcd, 172, "Motors", motorsEnabled ? "enabled" : "disabled", motorsEnabled ? c.ok : c.warning);
-    drawStatusLine(*lcd, 204, "Tracking", trackingEnabled ? "on" : "off", trackingEnabled ? c.ok : c.muted);
+    drawStatusLine(*lcd, 106, "IP", ipAddress ? ipAddress : "-", c.text);
+    drawStatusLine(*lcd, 134, "STM32 FW", version, stm32FirmwareVersion ? c.ok : c.warning);
+    //drawStatusLine(*lcd, 172, "Motors", motorsEnabled ? "enabled" : "disabled", motorsEnabled ? c.ok : c.warning);
+    drawStatusLine(*lcd, 162, "Mount", mountStatusText(mountStatus), mountStatusColor(mountStatus));
 
     lcd->drawRect(18, lcd->height() - 86, lcd->width() - 36, 54, c.accent);
     lcd->setTextDatum(textdatum_t::middle_center);

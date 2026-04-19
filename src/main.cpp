@@ -14,7 +14,7 @@
 //    [4]  Parser TCP robusto: comandi frammentati e multipli nello stesso chunk
 //    [5]  Timezone offset separato, non sommato a tm_hour
 //    [6]  handleStellariumOld() rimossa
-//    [7]  calcLST() usa timezoneOffsetHours, non le costanti NTP hardcoded
+//    [7]  LST calcolato dal controller clock in Telescope
 //    [8]  stelClient.stop() prima di sovrascrivere il client
 //    [9]  Modbus in task FreeRTOS separato (niente delay nel loop principale)
 //   [10]  Watchdog sul task Modbus
@@ -26,6 +26,7 @@
 
 #include <WiFi.h>
 #include <math.h>
+#include <string.h>
 #include <time.h>
 #include <Adafruit_NeoPixel.h>
 #include "telescope.h"
@@ -109,7 +110,6 @@ void    systemInputsTask(void* pvParams);
 void    displayTask(void* pvParams);
 void    notifyDisplayTask();
 void    syncNTP();
-double  calcLST();
 void    handleStellarium();
 void    processLX200Command(const String &cmd);
 void    sendResponse(const String &res);
@@ -245,7 +245,6 @@ void setup() {
     xTaskCreatePinnedToCore(systemInputsTask, "system_inputs", 2048, nullptr, 0, nullptr, SYSTEM_INPUTS_TASK_CORE);
 
     delay(700);
-    return;
 
     xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
     touchInputBegin(TOUCH_TASK_CORE);
@@ -400,11 +399,13 @@ void displayTask(void* pvParams) {
     (void)pvParams;
 
     struct DisplayViewState {
-        String wifiStatus;
-        String ipAddress;
+        bool wifiConnected;
+        bool stellariumConnected;
+        char ipAddress[16];
         uint16_t stm32FirmwareVersion;
+        bool soundEnabled;
         bool motorsEnabled;
-        bool trackingEnabled;
+        State mountStatus;
         uint8_t cpu0Load;
         uint8_t cpu1Load;
     };
@@ -418,27 +419,35 @@ void displayTask(void* pvParams) {
 #if ENABLE_CPU_LOAD_MONITOR
         CpuLoadSnapshot cpuLoad = cpuLoadGetSnapshot();
 #endif
-        DisplayViewState view = {
-            WiFi.status() == WL_CONNECTED ? String("connected") : String("offline"),
-            WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("-"),
-            state.stm32FirmwareVersion,
-            state.motorsEnabled,
-            state.trackingEnabled,
+        DisplayViewState view = {};
+        view.wifiConnected = WiFi.status() == WL_CONNECTED;
+        view.stellariumConnected = stelClient && stelClient.connected();
+        if (view.wifiConnected) {
+            IPAddress ip = WiFi.localIP();
+            snprintf(view.ipAddress, sizeof(view.ipAddress), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+        } else {
+            snprintf(view.ipAddress, sizeof(view.ipAddress), "-");
+        }
+        view.stm32FirmwareVersion = state.stm32FirmwareVersion;
+        view.soundEnabled = false;
+        view.motorsEnabled = state.motorsEnabled;
+        view.mountStatus = state.status;
 #if ENABLE_CPU_LOAD_MONITOR
-            cpuLoad.core0,
-            cpuLoad.core1
+        view.cpu0Load = cpuLoad.core0;
+        view.cpu1Load = cpuLoad.core1;
 #else
-            0,
-            0
+        view.cpu0Load = 0;
+        view.cpu1Load = 0;
 #endif
-        };
 
         bool mainChanged = !hasRendered
-                        || view.wifiStatus != lastRendered.wifiStatus
-                        || view.ipAddress != lastRendered.ipAddress
+                        || view.wifiConnected != lastRendered.wifiConnected
+                        || view.stellariumConnected != lastRendered.stellariumConnected
+                        || strcmp(view.ipAddress, lastRendered.ipAddress) != 0
                         || view.stm32FirmwareVersion != lastRendered.stm32FirmwareVersion
+                        || view.soundEnabled != lastRendered.soundEnabled
                         || view.motorsEnabled != lastRendered.motorsEnabled
-                        || view.trackingEnabled != lastRendered.trackingEnabled
+                        || view.mountStatus != lastRendered.mountStatus
                         || displayIsNightMode() != lastNightMode;
 #if ENABLE_CPU_LOAD_MONITOR
         bool cpuChanged = !hasRendered
@@ -447,11 +456,13 @@ void displayTask(void* pvParams) {
 #endif
 
         if (mainChanged) {
-            displayShowMainScreen(view.wifiStatus.c_str(),
-                                  view.ipAddress.c_str(),
+            displayShowMainScreen(view.wifiConnected,
+                                  view.stellariumConnected,
+                                  view.ipAddress,
                                   view.stm32FirmwareVersion,
+                                  view.soundEnabled,
                                   view.motorsEnabled,
-                                  view.trackingEnabled,
+                                  view.mountStatus,
                                   view.cpu0Load,
                                   view.cpu1Load);
             lastRendered = view;
@@ -519,35 +530,6 @@ void syncNTP() {
     }
     else
         Serial.println("\nWARNING: NTP fallito!");
-}
-
-// =============================================================================
-//  LST  –  FIX [7]: usa timezoneOffsetHours invece dei costanti NTP
-// =============================================================================
-double calcLST() {
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-
-    // Rimuove l'offset di fuso dall'epoch Unix per ottenere UTC puro
-    double utcSec = (double)tv.tv_sec - (double)timezoneOffsetHours * 3600.0
-                  + tv.tv_usec / 1e6;
-
-    double jd = 2440587.5 + utcSec / 86400.0;
-
-    double T        = (jd - 2451545.0) / 36525.0;
-    double gmst_deg = 280.46061837
-                    + 360.98564736629 * (jd - 2451545.0)
-                    + 0.000387933 * T * T
-                    - (T * T * T) / 38710000.0;
-
-    gmst_deg = fmod(gmst_deg, 360.0);
-    if (gmst_deg < 0) gmst_deg += 360.0;
-
-    double lst_deg = gmst_deg + LONGITUDE_DEG;
-    lst_deg = fmod(lst_deg, 360.0);
-    if (lst_deg < 0) lst_deg += 360.0;
-
-    return lst_deg / 15.0;
 }
 
 // =============================================================================
@@ -690,7 +672,6 @@ void processLX200Command(const String &cmd) {
     // --- GET DEC ---
     else if (cmd.startsWith(":GD#")) {
         lx200Ready = true;   // FIX [13]
-        telescope.normalize();
         telescope.getLX200Dec(reply);
         sendResponse(reply);
     }
@@ -725,7 +706,6 @@ void processLX200Command(const String &cmd) {
     // --- GET RA ---
     else if (cmd.startsWith(":GR#")) {
         lx200Ready = true;   // FIX [13]: handshake superato, ora possiamo inviare posizione
-        telescope.normalize();
         telescope.getLX200RA(reply);
         sendResponse(reply);
     }
