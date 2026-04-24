@@ -192,7 +192,7 @@ void drawStatusBarWithBattery(lgfx::LGFX_Device& lcd,
                               bool wifiConnected,
                               bool stellariumConnected) {
     drawStatusBar(lcd);
-    drawSpeakerIcon(lcd, lcd.width() - 126, 4, soundEnabled);
+    drawSpeakerIcon(lcd, lcd.width() - 126, 6, soundEnabled);
     drawStellariumIcon(lcd, lcd.width() - 78, 4, stellariumConnected);
     drawWifiIcon(lcd, lcd.width() - 54, 4, wifiConnected);
     drawBatteryLevel(lcd, lcd.width() - 30, 4, batteryLevel);

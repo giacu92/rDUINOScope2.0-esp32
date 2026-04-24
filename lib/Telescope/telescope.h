@@ -22,7 +22,7 @@ enum class TrackingMode : uint16_t {
 
 class Telescope {
 public:
-    const char *fw_ver = "004 24 2026#";
+    const char *fw_ver = "004 22 2026#";
 
     State status = State::IDLE;
     uint16_t stm32FirmwareVersion = 0;
