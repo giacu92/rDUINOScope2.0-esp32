@@ -33,6 +33,10 @@ SemaphoreHandle_t mountStateMutex = nullptr;
 MountLinkChangedCallback changedCallback = nullptr;
 volatile bool mountLinkPaused = false;
 volatile bool urgentStopRequested = false;
+volatile bool modbusWatchdogRegistered = false;
+bool gotoActive = false;
+bool followTargetActive = false;
+bool jogActive = false;
 
 double currentRA_h = 0.0;
 double currentDEC_deg = 0.0;
@@ -91,7 +95,13 @@ bool enqueueMountCommand(const MountCommand& cmd, TickType_t waitTicks = 0) {
 
 bool enqueuePriorityMountCommand(const MountCommand& cmd, TickType_t waitTicks = 0) {
     if (!mountCommandQueue) return false;
-    return xQueueSendToFront(mountCommandQueue, &cmd, waitTicks) == pdTRUE;
+    if (xQueueSendToFront(mountCommandQueue, &cmd, waitTicks) == pdTRUE) return true;
+
+    MountCommand discarded;
+    if (xQueueReceive(mountCommandQueue, &discarded, 0) == pdTRUE) {
+        return xQueueSendToFront(mountCommandQueue, &cmd, 0) == pdTRUE;
+    }
+    return false;
 }
 
 double raDeltaHours(double a, double b) {
@@ -133,32 +143,42 @@ bool writeCommandRequest(uint16_t command) {
     return true;
 }
 
+void clearLocalMotionRequests() {
+    gotoActive = false;
+    followTargetActive = false;
+    jogActive = false;
+
+    telescopeRef->setSlewing(false);
+    telescopeRef->trackingEnabled = false;
+    publishMountStateSnapshot();
+}
+
 bool applyStopRequest() {
     if (!telescopeRef) return false;
 
-    uint8_t trackingResult = modbus.writeSingleRegister(REG_REQ_TRACKING_ENABLE, 0);
     bool ok = writeCommandRequest(CMD_STOP);
     if (ok) {
-        telescopeRef->setSlewing(false);
-        telescopeRef->trackingEnabled = false;
-        publishMountStateSnapshot();
+        clearLocalMotionRequests();
 
-        for (uint8_t attempt = 0; attempt < 10; ++attempt) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            readPositionFromModbus();
-            if (telescopeRef->status != State::TRACKING
-                && telescopeRef->status != State::SLEWING
-                && telescopeRef->status != State::MANUAL_JOG) {
-                break;
+        constexpr uint8_t MAX_STOP_POLL = 50;
+        for (uint8_t attempt = 0; attempt < MAX_STOP_POLL; ++attempt) {
+            if (modbusWatchdogRegistered) {
+                esp_task_wdt_reset();
             }
+            readPositionFromModbus();
+            if (telescopeRef->status == State::IDLE) {
+                return true;
+            }
+            if (telescopeRef->status == State::ERROR) {
+                return false;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
         }
+        ok = false;
     }
     if (DEBUG_LX200_MODBUS) {
-        if (trackingResult != modbus.ku8MBSuccess) {
-            Serial.printf("[Modbus] STOP tracking disable failed: 0x%02X\n", trackingResult);
-        }
         if (!ok) {
-            Serial.println("[Modbus] STOP command request failed.");
+            Serial.println("[Modbus] STOP non completato: STM32 non ha riportato IDLE.");
         }
     }
     return ok;
@@ -201,8 +221,8 @@ void readPositionFromModbus() {
         currentDEC_deg = (dec_arcsec100 / 100.0) / 3600.0;
         telescopeRef->ra = currentRA_h;
         telescopeRef->dec = currentDEC_deg;
-        telescopeRef->isSlewing = (telescopeRef->status == State::SLEWING);
-        telescopeRef->trackingEnabled = (telescopeRef->status == State::TRACKING);
+        telescopeRef->isSlewing = (telescopeRef->status == State::SLEWING)
+                               || (telescopeRef->status == State::MANUAL_JOG);
         publishMountStateSnapshot();
 
         if (DEBUG_LX200_FULL) {
@@ -233,6 +253,10 @@ void applyMountCommand(const MountCommand& cmd) {
             if (result == modbus.ku8MBSuccess) {
                 result = writeCommandRequest(CMD_SET_TRACKING) ? modbus.ku8MBSuccess : 0xFF;
             }
+            if (result == modbus.ku8MBSuccess) {
+                telescopeRef->trackingEnabled = (cmd.value1 != 0);
+                publishMountStateSnapshot();
+            }
             break;
 
         case MountCommandType::SET_MOTORS:
@@ -253,10 +277,20 @@ void applyMountCommand(const MountCommand& cmd) {
             if (result == modbus.ku8MBSuccess) {
                 result = writeCommandRequest(CMD_JOG_START) ? modbus.ku8MBSuccess : 0xFF;
             }
+            if (result == modbus.ku8MBSuccess) {
+                jogActive = true;
+                telescopeRef->setSlewing(true);
+                publishMountStateSnapshot();
+            }
             break;
 
         case MountCommandType::JOG_STOP:
             result = writeCommandRequest(CMD_JOG_STOP) ? modbus.ku8MBSuccess : 0xFF;
+            if (result == modbus.ku8MBSuccess) {
+                jogActive = false;
+                telescopeRef->setSlewing(false);
+                publishMountStateSnapshot();
+            }
             break;
 
         case MountCommandType::GOTO:
@@ -274,6 +308,7 @@ void applyMountCommand(const MountCommand& cmd) {
 void modbusTask(void* pvParams) {
     (void)pvParams;
     esp_task_wdt_add(nullptr);
+    modbusWatchdogRegistered = true;
 
     static unsigned long lastPosRead = 0;
     for (;;) {
@@ -329,6 +364,9 @@ void modbusTask(void* pvParams) {
                 continue;
             }
 
+            gotoActive = true;
+            publishMountStateSnapshot();
+
             const int MAX_POLL = 3000;
             bool gotoFinished = false;
             bool sawSlewing = false;
@@ -362,6 +400,7 @@ void modbusTask(void* pvParams) {
                         }
                         telescopeRef->status = State::TRACKING;
                         telescopeRef->setSlewing(false);
+                        gotoActive = false;
                         publishMountStateSnapshot();
                         gotoFinished = true;
                         break;
@@ -377,6 +416,7 @@ void modbusTask(void* pvParams) {
                     }
                     telescopeRef->status = State::ERROR;
                     telescopeRef->setSlewing(false);
+                    gotoActive = false;
                     publishMountStateSnapshot();
                     gotoFinished = true;
                     break;
@@ -387,6 +427,7 @@ void modbusTask(void* pvParams) {
                         }
                         telescopeRef->status = State::IDLE;
                         telescopeRef->setSlewing(false);
+                        gotoActive = false;
                         publishMountStateSnapshot();
                         gotoFinished = true;
                         break;
@@ -400,6 +441,7 @@ void modbusTask(void* pvParams) {
                 }
                 telescopeRef->status = State::IDLE;
                 telescopeRef->setSlewing(false);
+                gotoActive = false;
                 publishMountStateSnapshot();
             }
             lastPosRead = millis();
@@ -431,7 +473,7 @@ bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStat
     bool stm32Ready = readSTM32FirmwareVersion();
     bool stopped = false;
     if (stm32Ready) {
-        stopped = writeCommandRequest(CMD_STOP);
+        stopped = applyStopRequest();
         if (stopped) {
             telescopeRef->status = State::IDLE;
             telescopeRef->setSlewing(false);
@@ -497,13 +539,7 @@ bool mountLinkRequestStop() {
 
     MountCommand cmd = {MountCommandType::STOP, 0, 0, 0, 0, 0};
     urgentStopRequested = true;
-    telescopeRef->status = State::IDLE;
-    telescopeRef->setSlewing(false);
-    telescopeRef->trackingEnabled = false;
-    publishMountStateSnapshot();
-    if (mountCommandQueue) {
-        xQueueReset(mountCommandQueue);
-    }
+    clearLocalMotionRequests();
     return enqueuePriorityMountCommand(cmd);
 }
 

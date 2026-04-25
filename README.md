@@ -212,6 +212,10 @@ Registers named `REG_REQ_*` are Modbus Master-side requests; registers named
 `REG_RES_*` are Modbus Slave-side responses. The one deliberate exception is
 `REG_REQ_COMMAND_PENDING`: ESP32 sets it to `1` after writing a command, and
 STM32 clears that pending flag back to `0` after consuming the command.
+Starting with STM32 firmware `0xB004`, request registers are owned and
+maintained by the ESP32. STM32 reports real machine state only through `RES_*`
+registers and does not rewrite `REQ_*` values during STOP, GOTO, SYNC, or
+automatic tracking transitions.
 
 The STM32 firmware already defines `CMD_SYNC=3` and `CMD_FOLLOW_TARGET=4`; the
 ESP32 keeps those values reserved. Manual jog intentionally uses dedicated
@@ -278,12 +282,17 @@ axis until `CMD_JOG_STOP` or `CMD_STOP` arrives. `CMD_JOG_STOP` is the normal
 button-release path; `CMD_STOP` remains the priority abort path.
 
 ESP32 treats STOP as a priority command. UI and LX200 abort requests enqueue a
-high-level stop action, clear `REG_REQ_TRACKING_ENABLE`, write `CMD_STOP`, and
-set `REG_REQ_COMMAND_PENDING=1`. If a GOTO is being polled, the Modbus task
-checks the pending stop flag during the poll loop so STM32 can start its own
-controlled stop/deceleration without waiting for the GOTO to complete. After
-sending STOP, ESP32 briefly polls STM32 state again so the local snapshot is
-corrected if STM32 is still decelerating or has not yet left tracking.
+high-level stop action, write `CMD_STOP`, and set `REG_REQ_COMMAND_PENDING=1`.
+STOP does not use `REG_REQ_TRACKING_ENABLE=0` as an implicit stop mechanism. If
+a GOTO is being polled, the Modbus task checks the pending stop flag during the
+poll loop so STM32 can start its own controlled stop/deceleration without
+waiting for the GOTO to complete. After sending STOP, ESP32 waits for
+`REG_RES_STATUS=IDLE`, then keeps the final `REG_RES_CURRENT_RA_*` and
+`REG_RES_CURRENT_DEC_*` position as the real reached position.
+
+Tracking enable/disable is explicit: ESP32 writes `REG_REQ_TRACKING_ENABLE` and
+`REG_REQ_TRACKING_MODE`, then writes `CMD_SET_TRACKING` and sets
+`REG_REQ_COMMAND_PENDING=1`.
 
 State values mirror the STM32 firmware:
 

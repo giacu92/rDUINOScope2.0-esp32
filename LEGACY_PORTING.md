@@ -755,8 +755,10 @@ Per portare la ciccia serve aggiungere comandi/register per:
   debounced, griglia 2x3 con pulsante 5 per ruotare le funzioni e Options
   placeholder raggiungibile dalla pagina System.
 - Collegare STOP UI a STM32. Fatto come azione high-level dalla pagina Mount:
-  il tasto 1 abbassa `REG_REQ_TRACKING_ENABLE`, richiede `CMD_STOP` con
-  priorita anche durante il polling GOTO e rilegge lo stato STM32.
+  il tasto 1 richiede `CMD_STOP` con priorita anche durante il polling GOTO,
+  senza usare `REG_REQ_TRACKING_ENABLE=0` come stop implicito. Con STM32
+  `0xB004`, ESP32 considera lo stop completato quando `REG_RES_STATUS` torna
+  `IDLE` e conserva la posizione reale letta dai registri `RES_CURRENT_*`.
 - Backlight PWM fatto; timeout ancora da implementare.
 
 ### Milestone 2: storage e cataloghi
