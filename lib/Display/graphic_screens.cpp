@@ -273,6 +273,92 @@ uint16_t mountStatusColor(State status) {
     return c.muted;
 }
 
+void onScreenMessageText(OnScreenMsg message, const char*& title, const char*& line1, const char*& line2) {
+    switch (message) {
+        case OnScreenMsg::Moving:
+            title = "MOVING";
+            line1 = "Step Back";
+            line2 = "PLEASE!";
+            return;
+        case OnScreenMsg::TrackingOff:
+            title = "WARNING";
+            line1 = "TRACKING was";
+            line2 = "Turned Off!";
+            return;
+        case OnScreenMsg::SelectDifferentStar:
+            title = "ERROR!";
+            line1 = "Not Visible";
+            line2 = "";
+            return;
+        case OnScreenMsg::OtaUpdate:
+            title = "OTA UPDATE";
+            line1 = "Uploading";
+            line2 = "Please wait";
+            return;
+        case OnScreenMsg::OtaFailed:
+            title = "OTA ERROR";
+            line1 = "Upload failed";
+            line2 = "Check serial";
+            return;
+        case OnScreenMsg::None:
+        default:
+            title = "";
+            line1 = "";
+            line2 = "";
+            return;
+    }
+}
+
+void drawOnScreenMessage(lgfx::LGFX_Device& lcd, OnScreenMsg message, int8_t progress = -1) {
+    if (message == OnScreenMsg::None) return;
+
+    const UiPalette& c = uiColors();
+    const char* title = nullptr;
+    const char* line1 = nullptr;
+    const char* line2 = nullptr;
+    onScreenMessageText(message, title, line1, line2);
+
+    const int w = min(220, lcd.width() - 32);
+    const bool showProgress = progress >= 0;
+    const int h = showProgress ? 132 : 112;
+    const int x = (lcd.width() - w) / 2;
+    const int y = (lcd.height() - h) / 2 + 16;
+    const int centerX = x + (w / 2);
+    const int titleY = y + 26;
+    const int line1Y = y + 62;
+    const int line2Y = y + 86;
+
+    lcd.fillRect(x, y, w, h, c.messageBackground);
+    lcd.drawRect(x, y, w, h, c.messageText);
+    lcd.drawRect(x + 1, y + 1, w - 2, h - 2, c.messageText);
+
+    lcd.setTextDatum(textdatum_t::middle_center);
+    lcd.setTextColor(c.messageText, c.messageBackground);
+    lcd.setFont(&fonts::DejaVu24);
+    lcd.drawString(title, centerX, titleY);
+    lcd.setFont(&fonts::DejaVu18);
+    lcd.drawString(line1, centerX, line1Y);
+    if (line2 && line2[0] != '\0') {
+        lcd.drawString(line2, centerX, line2Y);
+    }
+
+    if (showProgress) {
+        const int barW = w - 28;
+        const int barH = 10;
+        const int barX = x + 14;
+        const int barY = y + 114;
+        const uint8_t pct = min<uint8_t>(static_cast<uint8_t>(progress), 100);
+        const int filled = (barW - 2) * pct / 100;
+        char progressText[8];
+        snprintf(progressText, sizeof(progressText), "%u%%", pct);
+
+        lcd.drawRect(barX, barY, barW, barH, c.messageText);
+        lcd.fillRect(barX + 1, barY + 1, filled, barH - 2, c.messageText);
+        lcd.setFont(&fonts::DejaVu12);
+        lcd.drawString(progressText, centerX, barY - 11);
+    }
+}
+
 void drawBootStatusLine(lgfx::LGFX_Device& lcd, int8_t row, const char* label, BootStatus status) {
     const UiPalette& c = uiColors();
     const int y = 132 + (row * 14);
@@ -446,7 +532,8 @@ void displayShowMainScreen(bool wifiConnected,
                            bool motorsEnabled,
                            State mountStatus,
                            uint8_t cpu0Load,
-    uint8_t cpu1Load) {
+                           uint8_t cpu1Load,
+                           OnScreenMsg message) {
     lgfx::LGFX_Device* lcd = nullptr;
     if (!beginScreenDraw(lcd)) return;
 
@@ -471,6 +558,8 @@ void displayShowMainScreen(bool wifiConnected,
     lcd->setTextColor(c.accent, c.background);
     lcd->drawString("Options", lcd->width() / 2, lcd->height() - 59);
 
+    drawOnScreenMessage(*lcd, message);
+
     endScreenDraw();
 }
 
@@ -479,6 +568,15 @@ void displayShowCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load) {
     if (!beginScreenDraw(lcd)) return;
 
     drawCpuLoad(*lcd, cpu0Load, cpu1Load);
+
+    endScreenDraw();
+}
+
+void displayShowOnScreenMsg(OnScreenMsg message, int8_t progress) {
+    lgfx::LGFX_Device* lcd = nullptr;
+    if (!beginScreenDraw(lcd)) return;
+
+    drawOnScreenMessage(*lcd, message, progress);
 
     endScreenDraw();
 }

@@ -431,6 +431,7 @@ void displayTask(void* pvParams) {
         bool soundEnabled;
         bool motorsEnabled;
         State mountStatus;
+        OnScreenMsg onScreenMsg;
         uint8_t cpu0Load;
         uint8_t cpu1Load;
     };
@@ -462,6 +463,7 @@ void displayTask(void* pvParams) {
         view.soundEnabled = false;
         view.motorsEnabled = state.motorsEnabled;
         view.mountStatus = state.status;
+        view.onScreenMsg = state.isSlewing ? OnScreenMsg::Moving : OnScreenMsg::None;
 #if ENABLE_CPU_LOAD_MONITOR
         view.cpu0Load = cpuLoad.core0;
         view.cpu1Load = cpuLoad.core1;
@@ -478,6 +480,7 @@ void displayTask(void* pvParams) {
                         || view.soundEnabled != lastRendered.soundEnabled
                         || view.motorsEnabled != lastRendered.motorsEnabled
                         || view.mountStatus != lastRendered.mountStatus
+                        || view.onScreenMsg != lastRendered.onScreenMsg
                         || displayIsNightMode() != lastNightMode;
 #if ENABLE_CPU_LOAD_MONITOR
         bool cpuChanged = !hasRendered
@@ -494,7 +497,8 @@ void displayTask(void* pvParams) {
                                   view.motorsEnabled,
                                   view.mountStatus,
                                   view.cpu0Load,
-                                  view.cpu1Load);
+                                  view.cpu1Load,
+                                  view.onScreenMsg);
             lastRendered = view;
             lastNightMode = displayIsNightMode();
             hasRendered = true;
@@ -560,21 +564,27 @@ void initOtaUpdate() {
             if (stelClient && stelClient.connected()) {
                 stelClient.stop();
             }
+            displayShowOnScreenMsg(OnScreenMsg::OtaUpdate, 0);
         })
         .onEnd([]() {
+            displayShowOnScreenMsg(OnScreenMsg::OtaUpdate, 100);
             Serial.println("\n[OTA] Aggiornamento completato, riavvio in corso.");
         })
         .onProgress([](unsigned int progress, unsigned int total) {
             static unsigned int lastPercent = 101;
             unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
-            if (percent != lastPercent && (percent % 10U == 0U || percent == 100U)) {
-                Serial.printf("[OTA] %u%%\n", percent);
+            if (percent != lastPercent && (percent % 5U == 0U || percent == 100U)) {
+                displayShowOnScreenMsg(OnScreenMsg::OtaUpdate, static_cast<int8_t>(percent));
+                if (percent % 10U == 0U || percent == 100U) {
+                    Serial.printf("[OTA] %u%%\n", percent);
+                }
                 lastPercent = percent;
             }
         })
         .onError([](ota_error_t error) {
             otaInProgress = false;
             mountLinkSetPaused(false);
+            displayShowOnScreenMsg(OnScreenMsg::OtaFailed);
             Serial.printf("[OTA] Errore %u: ", error);
             if (error == OTA_AUTH_ERROR) Serial.println("autenticazione fallita");
             else if (error == OTA_BEGIN_ERROR) Serial.println("begin fallito");

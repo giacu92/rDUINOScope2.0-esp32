@@ -33,6 +33,15 @@ enum class BootStatus {
     None
 };
 
+enum class OnScreenMsg {
+    None,
+    Moving,
+    TrackingOff,
+    SelectDifferentStar,
+    OtaUpdate,
+    OtaFailed
+};
+
 struct UiPalette {
     uint16_t background;
     uint16_t panel;
@@ -92,5 +101,7 @@ void displayShowMainScreen(bool wifiConnected,
                            bool motorsEnabled,
                            State mountStatus,
                            uint8_t cpu0Load,
-                           uint8_t cpu1Load);
+                           uint8_t cpu1Load,
+                           OnScreenMsg message = OnScreenMsg::None);
 void displayShowCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load);
+void displayShowOnScreenMsg(OnScreenMsg message, int8_t progress = -1);
