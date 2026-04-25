@@ -32,6 +32,7 @@ QueueHandle_t mountCommandQueue = nullptr;
 SemaphoreHandle_t mountStateMutex = nullptr;
 MountLinkChangedCallback changedCallback = nullptr;
 volatile bool mountLinkPaused = false;
+volatile bool urgentStopRequested = false;
 
 double currentRA_h = 0.0;
 double currentDEC_deg = 0.0;
@@ -45,6 +46,8 @@ MountLinkSnapshot mountStateSnapshot = {
     0,
     0
 };
+
+void readPositionFromModbus();
 
 void notifyChanged() {
     if (changedCallback) {
@@ -86,6 +89,11 @@ bool enqueueMountCommand(const MountCommand& cmd, TickType_t waitTicks = 0) {
     return xQueueSend(mountCommandQueue, &cmd, waitTicks) == pdTRUE;
 }
 
+bool enqueuePriorityMountCommand(const MountCommand& cmd, TickType_t waitTicks = 0) {
+    if (!mountCommandQueue) return false;
+    return xQueueSendToFront(mountCommandQueue, &cmd, waitTicks) == pdTRUE;
+}
+
 double raDeltaHours(double a, double b) {
     double delta = fabs(a - b);
     if (delta > 12.0) delta = 24.0 - delta;
@@ -123,6 +131,37 @@ bool writeCommandRequest(uint16_t command) {
         Serial.printf("[Modbus] COMMAND request = %u.\n", command);
     }
     return true;
+}
+
+bool applyStopRequest() {
+    if (!telescopeRef) return false;
+
+    uint8_t trackingResult = modbus.writeSingleRegister(REG_REQ_TRACKING_ENABLE, 0);
+    bool ok = writeCommandRequest(CMD_STOP);
+    if (ok) {
+        telescopeRef->setSlewing(false);
+        telescopeRef->trackingEnabled = false;
+        publishMountStateSnapshot();
+
+        for (uint8_t attempt = 0; attempt < 10; ++attempt) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            readPositionFromModbus();
+            if (telescopeRef->status != State::TRACKING
+                && telescopeRef->status != State::SLEWING
+                && telescopeRef->status != State::MANUAL_JOG) {
+                break;
+            }
+        }
+    }
+    if (DEBUG_LX200_MODBUS) {
+        if (trackingResult != modbus.ku8MBSuccess) {
+            Serial.printf("[Modbus] STOP tracking disable failed: 0x%02X\n", trackingResult);
+        }
+        if (!ok) {
+            Serial.println("[Modbus] STOP command request failed.");
+        }
+    }
+    return ok;
 }
 
 bool readSTM32FirmwareVersion() {
@@ -182,11 +221,8 @@ void applyMountCommand(const MountCommand& cmd) {
 
     switch (cmd.type) {
         case MountCommandType::STOP:
-            result = writeCommandRequest(CMD_STOP) ? modbus.ku8MBSuccess : 0xFF;
-            if (result == modbus.ku8MBSuccess) {
-                telescopeRef->setSlewing(false);
-                publishMountStateSnapshot();
-            }
+            urgentStopRequested = false;
+            result = applyStopRequest() ? modbus.ku8MBSuccess : 0xFF;
             break;
 
         case MountCommandType::SET_TRACKING:
@@ -303,6 +339,17 @@ void modbusTask(void* pvParams) {
                     break;
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
+
+                if (urgentStopRequested) {
+                    urgentStopRequested = false;
+                    bool stopped = applyStopRequest();
+                    if (DEBUG_LX200_MODBUS) {
+                        Serial.printf("[Modbus] STOP prioritario durante GOTO: %s.\n",
+                                      stopped ? "ok" : "fallito");
+                    }
+                    gotoFinished = true;
+                    break;
+                }
 
                 readPositionFromModbus();
 
@@ -449,10 +496,15 @@ bool mountLinkRequestStop() {
     if (!telescopeRef) return false;
 
     MountCommand cmd = {MountCommandType::STOP, 0, 0, 0, 0, 0};
+    urgentStopRequested = true;
     telescopeRef->status = State::IDLE;
     telescopeRef->setSlewing(false);
+    telescopeRef->trackingEnabled = false;
     publishMountStateSnapshot();
-    return enqueueMountCommand(cmd);
+    if (mountCommandQueue) {
+        xQueueReset(mountCommandQueue);
+    }
+    return enqueuePriorityMountCommand(cmd);
 }
 
 bool mountLinkRequestTrackingEnabled(bool enabled) {

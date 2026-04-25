@@ -30,11 +30,14 @@ La repo attuale implementa soprattutto il bridge di comunicazione:
 - Modbus RTU verso STM32 per inviare target RA/DEC e leggere stato/posizione.
 - LED RGB di stato.
 - Base display/touch Milestone 1 avviata con LovyanGFX: boot diagnostics,
-  init/main screen statiche e helper comuni per le schermate.
+  init/main screen, eventi touch debounced, griglia soft-key 2x3 sulla main,
+  pulsante 5 per ruotare le funzioni, STOP da soft-key Mount e helper comuni
+  per le schermate.
 
 Non sono ancora presenti navigazione touch completa, cataloghi locali,
 allineamento, sensori ambientali, GPS/RTC locali, storage offline cataloghi,
-menu utente completo, joystick, buzzer, ventole, night mode e log osservazioni.
+menu utente completo, joystick, buzzer, ventole e log osservazioni. Il night
+mode base via GPIO e palette day/night e gia presente.
 
 ## Architettura da raggiungere
 
@@ -212,7 +215,9 @@ Da fare:
   attuale GPIO 4 e gia `RS485_DE_PIN`.
 - Portare driver touch e interrupt IRQ.
 - Portare calibrazione touch, salvataggio parametri e test post-calibrazione.
-- Creare router eventi touch equivalente a `considerTouchInput()`.
+- Creare router eventi touch equivalente a `considerTouchInput()`. Base fatta:
+  eventi press/release debounced, soft-key 2x3 sulla main, routing schermate e
+  azione STOP come comando UI alto livello verso il mount link.
 - Gestire wake-up display al primo touch quando il backlight e spento.
 
 ### SD e dati offline
@@ -746,8 +751,13 @@ Per portare la ciccia serve aggiungere comandi/register per:
 - Definire pin in `config.h`. Fatto con pin provvisori da verificare sul
   cablaggio finale.
 - Mostrare boot screen e main screen statico. Fatto; presente anche init screen.
-- Leggere touch e navigare tra main/options.
-- Backlight PWM e timeout.
+- Leggere touch e navigare sulla main. Fatto come base: eventi press/release
+  debounced, griglia 2x3 con pulsante 5 per ruotare le funzioni e Options
+  placeholder raggiungibile dalla pagina System.
+- Collegare STOP UI a STM32. Fatto come azione high-level dalla pagina Mount:
+  il tasto 1 abbassa `REG_REQ_TRACKING_ENABLE`, richiede `CMD_STOP` con
+  priorita anche durante il polling GOTO e rilegge lo stato STM32.
+- Backlight PWM fatto; timeout ancora da implementare.
 
 ### Milestone 2: storage e cataloghi
 

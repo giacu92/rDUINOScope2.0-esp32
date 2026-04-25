@@ -42,6 +42,22 @@ enum class OnScreenMsg {
     OtaFailed
 };
 
+enum class MainButtonPage : uint8_t {
+    Mount,
+    Catalog,
+    Session,
+    System
+};
+
+enum class UiTouchPhase : uint8_t {
+    Pressed,
+    Released
+};
+
+enum class UiAction : uint8_t {
+    MountStop
+};
+
 struct UiPalette {
     uint16_t background;
     uint16_t panel;
@@ -73,13 +89,31 @@ public:
     void setScreen(ScreenType newScreen);
     ScreenType getCurrentScreen() const;
 
+    void setMainButtonPage(MainButtonPage page);
+    MainButtonPage getMainButtonPage() const;
+    void advanceMainButtonPage();
+
+    void registerTouch(UiTouchPhase phase, uint16_t x, uint16_t y, uint32_t atMs);
+    bool pollAction(UiAction& action);
+    uint32_t getRouteRevision() const;
+
     void setNightMode(bool enabled);
     bool isNightMode() const;
     const UiPalette& colors() const;
 
 private:
     ScreenType currentScreen = ScreenType::Main;
+    MainButtonPage mainButtonPage = MainButtonPage::Mount;
+    uint32_t routeRevision = 0;
+    uint16_t lastTouchX = 0;
+    uint16_t lastTouchY = 0;
+    uint32_t lastTouchAtMs = 0;
+    UiAction pendingActions[4] = {};
+    uint8_t pendingActionHead = 0;
+    uint8_t pendingActionTail = 0;
     bool nightMode = false;
+
+    void enqueueAction(UiAction action);
 };
 
 const UiPalette& uiColors();
@@ -88,6 +122,10 @@ const UiPalette& uiNightPalette();
 
 void displaySetNightMode(bool enabled);
 bool displayIsNightMode();
+bool displayConsiderTouchInput(UiTouchPhase phase, uint16_t x, uint16_t y, uint32_t atMs);
+bool displayPollAction(UiAction& action);
+uint32_t displayGetRouteRevision();
+bool displayCanUpdateCpuLoadRegion();
 
 // Complete screen/paint operations. These functions own the display lock.
 void displayShowBootScreen();
@@ -103,5 +141,16 @@ void displayShowMainScreen(bool wifiConnected,
                            uint8_t cpu0Load,
                            uint8_t cpu1Load,
                            OnScreenMsg message = OnScreenMsg::None);
+void displayShowOptionsPlaceholder();
+void displayShowCurrentScreen(bool wifiConnected,
+                              bool stellariumConnected,
+                              const char* ipAddress,
+                              uint16_t stm32FirmwareVersion,
+                              bool soundEnabled,
+                              bool motorsEnabled,
+                              State mountStatus,
+                              uint8_t cpu0Load,
+                              uint8_t cpu1Load,
+                              OnScreenMsg message = OnScreenMsg::None);
 void displayShowCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load);
 void displayShowOnScreenMsg(OnScreenMsg message, int8_t progress = -1);

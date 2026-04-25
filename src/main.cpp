@@ -255,7 +255,7 @@ void setup() {
     delay(700);
 
     xTaskCreatePinnedToCore(displayTask, "display", 6144, nullptr, 1, &displayTaskHandle, DISPLAY_TASK_CORE);
-    touchInputBegin(TOUCH_TASK_CORE);
+    touchInputBegin(TOUCH_TASK_CORE, notifyDisplayTask);
 }
 
 // =============================================================================
@@ -420,6 +420,33 @@ void systemInputsTask(void* pvParams) {
     }
 }
 
+bool handleDisplayTouchEvents() {
+    TouchEvent event;
+    bool uiChanged = false;
+
+    while (touchInputGetEvent(event)) {
+        UiTouchPhase phase = event.type == TouchEventType::Pressed
+                           ? UiTouchPhase::Pressed
+                           : UiTouchPhase::Released;
+        uiChanged |= displayConsiderTouchInput(phase, event.x, event.y, event.atMs);
+    }
+
+    return uiChanged;
+}
+
+void handleDisplayActions() {
+    UiAction action;
+    while (displayPollAction(action)) {
+        switch (action) {
+            case UiAction::MountStop:
+                if (!mountLinkRequestStop() && DEBUG_LX200) {
+                    Serial.println("[UI] STOP request failed.");
+                }
+                break;
+        }
+    }
+}
+
 void displayTask(void* pvParams) {
     (void)pvParams;
 
@@ -439,6 +466,7 @@ void displayTask(void* pvParams) {
     DisplayViewState lastRendered = {};
     bool hasRendered = false;
     bool lastNightMode = displayIsNightMode();
+    uint32_t lastRouteRevision = displayGetRouteRevision();
 
     for (;;) {
         if (otaInProgress) {
@@ -446,6 +474,9 @@ void displayTask(void* pvParams) {
             continue;
         }
 
+        bool uiChanged = handleDisplayTouchEvents();
+        handleDisplayActions();
+        uint32_t currentRouteRevision = displayGetRouteRevision();
         MountLinkSnapshot state = mountLinkGetSnapshot();
 #if ENABLE_CPU_LOAD_MONITOR
         CpuLoadSnapshot cpuLoad = cpuLoadGetSnapshot();
@@ -473,6 +504,8 @@ void displayTask(void* pvParams) {
 #endif
 
         bool mainChanged = !hasRendered
+                        || uiChanged
+                        || currentRouteRevision != lastRouteRevision
                         || view.wifiConnected != lastRendered.wifiConnected
                         || view.stellariumConnected != lastRendered.stellariumConnected
                         || strcmp(view.ipAddress, lastRendered.ipAddress) != 0
@@ -489,21 +522,22 @@ void displayTask(void* pvParams) {
 #endif
 
         if (mainChanged) {
-            displayShowMainScreen(view.wifiConnected,
-                                  view.stellariumConnected,
-                                  view.ipAddress,
-                                  view.stm32FirmwareVersion,
-                                  view.soundEnabled,
-                                  view.motorsEnabled,
-                                  view.mountStatus,
-                                  view.cpu0Load,
-                                  view.cpu1Load,
-                                  view.onScreenMsg);
+            displayShowCurrentScreen(view.wifiConnected,
+                                     view.stellariumConnected,
+                                     view.ipAddress,
+                                     view.stm32FirmwareVersion,
+                                     view.soundEnabled,
+                                     view.motorsEnabled,
+                                     view.mountStatus,
+                                     view.cpu0Load,
+                                     view.cpu1Load,
+                                     view.onScreenMsg);
             lastRendered = view;
             lastNightMode = displayIsNightMode();
+            lastRouteRevision = currentRouteRevision;
             hasRendered = true;
 #if ENABLE_CPU_LOAD_MONITOR
-        } else if (cpuChanged) {
+        } else if (displayCanUpdateCpuLoadRegion() && cpuChanged) {
             displayShowCpuLoad(view.cpu0Load, view.cpu1Load);
             lastRendered.cpu0Load = view.cpu0Load;
             lastRendered.cpu1Load = view.cpu1Load;

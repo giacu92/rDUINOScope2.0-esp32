@@ -120,7 +120,8 @@ shows:
 - boot diagnostics screen immediately after serial startup;
 - per-device initialization status rows for touch, WiFi, time, reserved GPS and
   sensor slots, Modbus/STM32, and the TCP server;
-- static main screen with WiFi, IP, STM32 firmware, motors, and tracking state.
+- main screen with WiFi, IP, STM32 firmware, motors, and tracking state;
+- six soft buttons in a 2x3 grid in the lower third of the main screen.
 
 The display hardware service lives in `lib/Display/display.h` and
 `lib/Display/display.cpp`. That module owns LovyanGFX initialization, panel and
@@ -130,8 +131,9 @@ Graphical screens live in `lib/Display/graphic_screens.h` and
 `lib/Display/graphic_screens.cpp`. That layer owns the shared UI palette,
 day/night theme selection, reusable drawing helpers such as `drawHeader()`,
 `drawCpuLoad()`, and `drawBatteryLevel()`, and the current boot/init/main
-screen renderers. Rendering code should use `uiColors()` rather than defining
-local color constants.
+screen renderers. It also owns the current `ScreenType` selection used by the
+display task. Rendering code should use `uiColors()` rather than defining local
+color constants.
 
 Night mode can be forced by the `IS_NIGHT_MODE_PIN` digital input in
 `lib/Telescope/config.h`. The pin is configured as `INPUT_PULLUP`, so the
@@ -160,15 +162,23 @@ After boot, `displayTask` is responsible for rendering screens when visible
 state changes. Setup may draw the early boot and
 initialization screens before the task starts; from the main screen onward,
 other code should publish state or enqueue high-level UI actions instead of
-drawing directly.
+drawing directly. The task drains touch events and passes them into the
+graphical screen layer, which owns the current screen and hit testing in the
+same spirit as the legacy `considerTouchInput()` flow. The main screen has four
+rotating soft-button pages: mount, catalog, session, and system. Button 5, the
+center button on the lower row, advances to the next soft-button page. The
+mount page's button 1 emits a high-level mount STOP action. The options screen
+still exists only as a placeholder and is reachable from the system soft-button
+page.
 
 Touch input has its own path. The XPT2046 IRQ wakes `touchTask`, and that task
 reads coordinates outside the interrupt handler. The ISR only notifies the task:
 it does not use SPI, LovyanGFX, logging, or UI logic. Because display and touch
 share the same SPI/LovyanGFX device, the public display functions are protected
 by a short mutex. The touch task also keeps a slow idle fallback check and, once
-a press is active, samples until release so future buttons can get stable press
-and release events.
+a press is active, samples until release so buttons get stable press and release
+events. Touch events are queued as `Pressed`/`Released` records with an
+80 ms per-event-type debounce before the display task consumes them.
 
 The touch input plumbing lives in `lib/Input/touch_input.h` and
 `lib/Input/touch_input.cpp`, keeping ISR and input-task details out of
@@ -266,6 +276,14 @@ The boot diagnostics use that result to mark the STM32/Modbus row as `OK` or
 `REG_REQ_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested
 axis until `CMD_JOG_STOP` or `CMD_STOP` arrives. `CMD_JOG_STOP` is the normal
 button-release path; `CMD_STOP` remains the priority abort path.
+
+ESP32 treats STOP as a priority command. UI and LX200 abort requests enqueue a
+high-level stop action, clear `REG_REQ_TRACKING_ENABLE`, write `CMD_STOP`, and
+set `REG_REQ_COMMAND_PENDING=1`. If a GOTO is being polled, the Modbus task
+checks the pending stop flag during the poll loop so STM32 can start its own
+controlled stop/deceleration without waiting for the GOTO to complete. After
+sending STOP, ESP32 briefly polls STM32 state again so the local snapshot is
+corrected if STM32 is still decelerating or has not yet left tracking.
 
 State values mirror the STM32 firmware:
 

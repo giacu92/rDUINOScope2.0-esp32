@@ -62,6 +62,15 @@ constexpr UiPalette NIGHT_PALETTE = {
 
 UIManager ui;
 
+constexpr int MAIN_BUTTON_GRID_X = 10;
+constexpr int MAIN_BUTTON_GRID_Y = 210;
+constexpr int MAIN_BUTTON_W = 68;
+constexpr int MAIN_BUTTON_H = 44;
+constexpr int MAIN_BUTTON_GAP_X = 8;
+constexpr int MAIN_BUTTON_GAP_Y = 8;
+constexpr uint8_t MAIN_PAGE_BUTTON_NEXT = 5;
+constexpr uint8_t MAIN_PAGE_BUTTON_SYSTEM_OPTIONS = 6;
+
 bool beginScreenDraw(lgfx::LGFX_Device*& lcd) {
     Display& disp = display();
     if (!disp.isReady()) return false;
@@ -223,6 +232,113 @@ void drawProgress(lgfx::LGFX_Device& lcd, uint8_t progress) {
     lcd.fillRect(x + 1, y + 1, max(0, filled - 2), h - 2, c.accent);
 }
 
+const char* mainButtonPageText(MainButtonPage page) {
+    switch (page) {
+        case MainButtonPage::Mount:   return "MOUNT";
+        case MainButtonPage::Catalog: return "CAT";
+        case MainButtonPage::Session: return "SESSION";
+        case MainButtonPage::System:  return "SYSTEM";
+    }
+    return "MAIN";
+}
+
+const char* mainButtonLabel(MainButtonPage page, uint8_t buttonIndex) {
+    if (buttonIndex == 5) return "Next";
+
+    switch (page) {
+        case MainButtonPage::Mount:
+            switch (buttonIndex) {
+                case 1: return "Stop";
+                case 2: return "Track";
+                case 3: return "Motors";
+                case 4: return "Jog";
+                case 6: return "Sync";
+            }
+            break;
+        case MainButtonPage::Catalog:
+            switch (buttonIndex) {
+                case 1: return "Load";
+                case 2: return "Search";
+                case 3: return "Solar";
+                case 4: return "Stars";
+                case 6: return "Goto";
+            }
+            break;
+        case MainButtonPage::Session:
+            switch (buttonIndex) {
+                case 1: return "Stats";
+                case 2: return "Log";
+                case 3: return "Mark";
+                case 4: return "Map";
+                case 6: return "Align";
+            }
+            break;
+        case MainButtonPage::System:
+            switch (buttonIndex) {
+                case 1: return "WiFi";
+                case 2: return "Time";
+                case 3: return "Display";
+                case 4: return "OTA";
+                case 6: return "Options";
+            }
+            break;
+    }
+    return "-";
+}
+
+void drawMainButtonGrid(lgfx::LGFX_Device& lcd, MainButtonPage page) {
+    const UiPalette& c = uiColors();
+
+    lcd.setTextDatum(textdatum_t::middle_center);
+    lcd.setFont(&fonts::Font2);
+
+    for (uint8_t index = 1; index <= 6; ++index) {
+        const uint8_t zeroBased = index - 1;
+        const int col = zeroBased % 3;
+        const int row = zeroBased / 3;
+        const int x = MAIN_BUTTON_GRID_X + col * (MAIN_BUTTON_W + MAIN_BUTTON_GAP_X);
+        const int y = MAIN_BUTTON_GRID_Y + row * (MAIN_BUTTON_H + MAIN_BUTTON_GAP_Y);
+        const bool isPageButton = index == 5;
+
+        uint16_t border = isPageButton ? c.warning : c.accent;
+        uint16_t text = isPageButton ? c.warning : c.accent;
+
+        lcd.drawRect(x, y, MAIN_BUTTON_W, MAIN_BUTTON_H, border);
+        lcd.setTextColor(text, c.background);
+        lcd.drawString(mainButtonLabel(page, index), x + MAIN_BUTTON_W / 2, y + MAIN_BUTTON_H / 2);
+    }
+
+    lcd.setFont(&fonts::DejaVu9);
+    lcd.setTextColor(c.muted, c.background);
+    lcd.drawString(mainButtonPageText(page), lcd.width() / 2, MAIN_BUTTON_GRID_Y - 11);
+}
+
+uint8_t mainButtonAt(uint16_t x, uint16_t y) {
+    for (uint8_t index = 1; index <= 6; ++index) {
+        const uint8_t zeroBased = index - 1;
+        const int col = zeroBased % 3;
+        const int row = zeroBased / 3;
+        const int left = MAIN_BUTTON_GRID_X + col * (MAIN_BUTTON_W + MAIN_BUTTON_GAP_X);
+        const int top = MAIN_BUTTON_GRID_Y + row * (MAIN_BUTTON_H + MAIN_BUTTON_GAP_Y);
+
+        if (x >= left
+            && x < left + MAIN_BUTTON_W
+            && y >= top
+            && y < top + MAIN_BUTTON_H) {
+            return index;
+        }
+    }
+
+    return 0;
+}
+
+bool isOptionsBackButton(uint16_t x, uint16_t y) {
+    return x >= 18
+        && x <= TFT_WIDTH - 18
+        && y >= TFT_HEIGHT - 70
+        && y <= TFT_HEIGHT - 24;
+}
+
 const char* bootStatusText(BootStatus status) {
     switch (status) {
         case BootStatus::Pending: return "WAIT";
@@ -381,11 +497,90 @@ void drawBootStatusLine(lgfx::LGFX_Device& lcd, int8_t row, const char* label, B
 } // namespace
 
 void UIManager::setScreen(ScreenType newScreen) {
+    if (currentScreen == newScreen) return;
     currentScreen = newScreen;
+    routeRevision++;
 }
 
 ScreenType UIManager::getCurrentScreen() const {
     return currentScreen;
+}
+
+void UIManager::setMainButtonPage(MainButtonPage page) {
+    if (mainButtonPage == page) return;
+    mainButtonPage = page;
+    routeRevision++;
+}
+
+MainButtonPage UIManager::getMainButtonPage() const {
+    return mainButtonPage;
+}
+
+void UIManager::advanceMainButtonPage() {
+    switch (mainButtonPage) {
+        case MainButtonPage::Mount:
+            mainButtonPage = MainButtonPage::Catalog;
+            break;
+        case MainButtonPage::Catalog:
+            mainButtonPage = MainButtonPage::Session;
+            break;
+        case MainButtonPage::Session:
+            mainButtonPage = MainButtonPage::System;
+            break;
+        case MainButtonPage::System:
+        default:
+            mainButtonPage = MainButtonPage::Mount;
+            break;
+    }
+    routeRevision++;
+}
+
+void UIManager::registerTouch(UiTouchPhase phase, uint16_t x, uint16_t y, uint32_t atMs) {
+    lastTouchX = x;
+    lastTouchY = y;
+    lastTouchAtMs = atMs;
+
+    if (phase != UiTouchPhase::Released) {
+        return;
+    }
+
+    if (currentScreen == ScreenType::Main) {
+        uint8_t button = mainButtonAt(lastTouchX, lastTouchY);
+        if (button == MAIN_PAGE_BUTTON_NEXT) {
+            advanceMainButtonPage();
+        } else if (mainButtonPage == MainButtonPage::Mount && button == 1) {
+            enqueueAction(UiAction::MountStop);
+        } else if (mainButtonPage == MainButtonPage::System
+                && button == MAIN_PAGE_BUTTON_SYSTEM_OPTIONS) {
+            setScreen(ScreenType::Options);
+        }
+    } else if (currentScreen == ScreenType::Options && isOptionsBackButton(lastTouchX, lastTouchY)) {
+        setScreen(ScreenType::Main);
+    }
+}
+
+void UIManager::enqueueAction(UiAction action) {
+    uint8_t nextTail = (pendingActionTail + 1) % 4;
+    if (nextTail == pendingActionHead) {
+        pendingActionHead = (pendingActionHead + 1) % 4;
+    }
+
+    pendingActions[pendingActionTail] = action;
+    pendingActionTail = nextTail;
+}
+
+bool UIManager::pollAction(UiAction& action) {
+    if (pendingActionHead == pendingActionTail) {
+        return false;
+    }
+
+    action = pendingActions[pendingActionHead];
+    pendingActionHead = (pendingActionHead + 1) % 4;
+    return true;
+}
+
+uint32_t UIManager::getRouteRevision() const {
+    return routeRevision;
 }
 
 void UIManager::setNightMode(bool enabled) {
@@ -418,6 +613,24 @@ void displaySetNightMode(bool enabled) {
 
 bool displayIsNightMode() {
     return ui.isNightMode();
+}
+
+bool displayConsiderTouchInput(UiTouchPhase phase, uint16_t x, uint16_t y, uint32_t atMs) {
+    uint32_t before = ui.getRouteRevision();
+    ui.registerTouch(phase, x, y, atMs);
+    return ui.getRouteRevision() != before;
+}
+
+bool displayPollAction(UiAction& action) {
+    return ui.pollAction(action);
+}
+
+uint32_t displayGetRouteRevision() {
+    return ui.getRouteRevision();
+}
+
+bool displayCanUpdateCpuLoadRegion() {
+    return ui.getCurrentScreen() == ScreenType::Main;
 }
 
 #if 0
@@ -553,14 +766,62 @@ void displayShowMainScreen(bool wifiConnected,
     //drawStatusLine(*lcd, 172, "Motors", motorsEnabled ? "enabled" : "disabled", motorsEnabled ? c.ok : c.warning);
     drawStatusLine(*lcd, 162, "Mount", mountStatusText(mountStatus), mountStatusColor(mountStatus));
 
-    lcd->drawRect(18, lcd->height() - 86, lcd->width() - 36, 54, c.accent);
-    lcd->setTextDatum(textdatum_t::middle_center);
-    lcd->setTextColor(c.accent, c.background);
-    lcd->drawString("Options", lcd->width() / 2, lcd->height() - 59);
+    drawMainButtonGrid(*lcd, ui.getMainButtonPage());
 
     drawOnScreenMessage(*lcd, message);
 
     endScreenDraw();
+}
+
+void displayShowOptionsPlaceholder() {
+    lgfx::LGFX_Device* lcd = nullptr;
+    if (!beginScreenDraw(lcd)) return;
+
+    const UiPalette& c = uiColors();
+    lcd->fillScreen(c.background);
+    drawHeader(*lcd, "Options");
+
+    lcd->setTextDatum(textdatum_t::middle_center);
+    lcd->setFont(&fonts::Font2);
+    lcd->setTextColor(c.muted, c.background);
+    lcd->drawString("Screen router ready", lcd->width() / 2, 132);
+    lcd->drawString("Options UI comes next", lcd->width() / 2, 154);
+
+    lcd->drawRect(18, lcd->height() - 70, lcd->width() - 36, 46, c.accent);
+    lcd->setTextColor(c.accent, c.background);
+    lcd->drawString("Back", lcd->width() / 2, lcd->height() - 47);
+
+    endScreenDraw();
+}
+
+void displayShowCurrentScreen(bool wifiConnected,
+                              bool stellariumConnected,
+                              const char* ipAddress,
+                              uint16_t stm32FirmwareVersion,
+                              bool soundEnabled,
+                              bool motorsEnabled,
+                              State mountStatus,
+                              uint8_t cpu0Load,
+                              uint8_t cpu1Load,
+                              OnScreenMsg message) {
+    switch (ui.getCurrentScreen()) {
+        case ScreenType::Options:
+            displayShowOptionsPlaceholder();
+            break;
+        case ScreenType::Main:
+        default:
+            displayShowMainScreen(wifiConnected,
+                                  stellariumConnected,
+                                  ipAddress,
+                                  stm32FirmwareVersion,
+                                  soundEnabled,
+                                  motorsEnabled,
+                                  mountStatus,
+                                  cpu0Load,
+                                  cpu1Load,
+                                  message);
+            break;
+    }
 }
 
 void displayShowCpuLoad(uint8_t cpu0Load, uint8_t cpu1Load) {

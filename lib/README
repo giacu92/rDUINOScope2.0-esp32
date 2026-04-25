@@ -19,6 +19,12 @@ Display hardware and graphical screen rendering.
 - Owns the shared UI palette, day/night theme selection, reusable drawing
   helpers, and the boot, initialization, main-screen, optional CPU-load, and
   battery renderers.
+- Owns the current screen selection and the rotating main-screen soft-button
+  page state used by the display task.
+- Handles touch coordinates through a `considerTouchInput`-style path, keeping
+  screen-specific hit testing and routing out of `src/main.cpp`.
+- Publishes high-level UI actions such as mount STOP; application code consumes
+  those actions and calls the relevant service API.
 - Exposes `displayBootSetStatus()` so setup can update boot diagnostics without
   reaching into internal `draw*` helpers.
 
@@ -29,6 +35,8 @@ Local input handling.
 - Owns the touch task.
 - Uses the XPT2046 IRQ only to wake the task.
 - Reads touch coordinates outside the ISR through the Display API.
+- Publishes debounced `Pressed` and `Released` events through a FreeRTOS queue
+  so UI routing can stay outside the interrupt and touch sampling path.
 
 ## Mount
 
@@ -40,6 +48,7 @@ ESP32-to-STM32 mount link.
 - `mountLinkBegin()` returns whether the STM32 answered the firmware-version
   register with a valid value instead of the disconnected `0xFFFF` value.
 - Exposes high-level APIs such as GOTO, STOP, tracking, motors, and jog.
+- Treats STOP as a priority request, including while a GOTO poll loop is active.
 
 ## System
 
