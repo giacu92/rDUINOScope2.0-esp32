@@ -19,6 +19,7 @@ using MountLinkChangedCallback = void (*)();
 
 bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStateChanged = nullptr);
 void mountLinkStartTask(BaseType_t taskCore);
+void mountLinkSetPaused(bool paused);
 void mountLinkReadSTM32FirmwareVersion();
 MountLinkSnapshot mountLinkGetSnapshot();
 

@@ -25,6 +25,7 @@
 // =============================================================================
 
 #include <WiFi.h>
+#include <ArduinoOTA.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
@@ -93,11 +94,14 @@ enum WifiLedState {
 WifiLedState wifiLedState = WIFI_LED_DISCONNECTED;
 bool statusLedHasRendered = false;
 TaskHandle_t displayTaskHandle = nullptr;
+volatile bool otaInProgress = false;
 
 // -----------------------------------------------------------------------------
 // Prototipi
 // -----------------------------------------------------------------------------
 bool    connectWiFi();
+void    initOtaUpdate();
+void    handleOtaUpdate();
 void    initStatusLed();
 void    setWifiLedState(WifiLedState state);
 void    renderStellariumConnectedLed();
@@ -164,7 +168,11 @@ void setup() {
     }
 
     displayBootSetStatus(1, "WiFi", BootStatus::Running);
-    displayBootSetStatus(1, "WiFi", connectWiFi() ? BootStatus::Ok : BootStatus::Fail);
+    bool wifiReady = connectWiFi();
+    displayBootSetStatus(1, "WiFi", wifiReady ? BootStatus::Ok : BootStatus::Fail);
+    if (wifiReady) {
+        initOtaUpdate();
+    }
 
     displayBootSetStatus(2, "Clock / NTP", BootStatus::Running);
     syncNTP();
@@ -254,6 +262,13 @@ void setup() {
 //  LOOP  (Arduino core 1) - WiFi/TCP, niente delay lunghi
 // =============================================================================
 void loop() {
+    handleOtaUpdate();
+
+    if (otaInProgress) {
+        delay(10);
+        return;
+    }
+
     handleStellarium();
 
 																					
@@ -352,6 +367,11 @@ void statusLedTask(void* pvParams) {
     (void)pvParams;
 
     for (;;) {
+        if (otaInProgress) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
         updateWifiLedFromStatus();
         if (wifiLedState == WIFI_LED_STELLARIUM_CONNECTED) {
             renderStellariumConnectedLed();
@@ -388,6 +408,11 @@ void systemInputsTask(void* pvParams) {
     (void)pvParams;
 
     for (;;) {
+        if (otaInProgress) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
         applyNightModeInput(readNightModeInput());
 
         // Future slow sensors and board-level inputs can be sampled here.
@@ -415,6 +440,11 @@ void displayTask(void* pvParams) {
     bool lastNightMode = displayIsNightMode();
 
     for (;;) {
+        if (otaInProgress) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+            continue;
+        }
+
         MountLinkSnapshot state = mountLinkGetSnapshot();
 #if ENABLE_CPU_LOAD_MONITOR
         CpuLoadSnapshot cpuLoad = cpuLoadGetSnapshot();
@@ -513,6 +543,57 @@ bool connectWiFi() {
     setWifiLedState(WIFI_LED_CONNECTED);
     Serial.printf("\nConnesso! IP: %s\n", WiFi.localIP().toString().c_str());
     return true;
+}
+
+void initOtaUpdate() {
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    if (OTA_PASSWORD[0] != '\0') {
+        ArduinoOTA.setPassword(OTA_PASSWORD);
+    }
+
+    ArduinoOTA
+        .onStart([]() {
+            otaInProgress = true;
+            mountLinkSetPaused(true);
+            const char* target = ArduinoOTA.getCommand() == U_FLASH ? "firmware" : "filesystem";
+            Serial.printf("[OTA] Avvio aggiornamento %s\n", target);
+            if (stelClient && stelClient.connected()) {
+                stelClient.stop();
+            }
+        })
+        .onEnd([]() {
+            Serial.println("\n[OTA] Aggiornamento completato, riavvio in corso.");
+        })
+        .onProgress([](unsigned int progress, unsigned int total) {
+            static unsigned int lastPercent = 101;
+            unsigned int percent = total == 0 ? 0 : (progress * 100U) / total;
+            if (percent != lastPercent && (percent % 10U == 0U || percent == 100U)) {
+                Serial.printf("[OTA] %u%%\n", percent);
+                lastPercent = percent;
+            }
+        })
+        .onError([](ota_error_t error) {
+            otaInProgress = false;
+            mountLinkSetPaused(false);
+            Serial.printf("[OTA] Errore %u: ", error);
+            if (error == OTA_AUTH_ERROR) Serial.println("autenticazione fallita");
+            else if (error == OTA_BEGIN_ERROR) Serial.println("begin fallito");
+            else if (error == OTA_CONNECT_ERROR) Serial.println("connessione fallita");
+            else if (error == OTA_RECEIVE_ERROR) Serial.println("ricezione fallita");
+            else if (error == OTA_END_ERROR) Serial.println("end fallito");
+            else Serial.println("sconosciuto");
+        });
+
+    ArduinoOTA.begin();
+    Serial.printf("[OTA] Pronto: %s.local / %s\n",
+                  OTA_HOSTNAME,
+                  WiFi.localIP().toString().c_str());
+}
+
+void handleOtaUpdate() {
+    if (WiFi.status() == WL_CONNECTED) {
+        ArduinoOTA.handle();
+    }
 }
 
 // =============================================================================

@@ -31,6 +31,7 @@ Telescope* telescopeRef = nullptr;
 QueueHandle_t mountCommandQueue = nullptr;
 SemaphoreHandle_t mountStateMutex = nullptr;
 MountLinkChangedCallback changedCallback = nullptr;
+volatile bool mountLinkPaused = false;
 
 double currentRA_h = 0.0;
 double currentDEC_deg = 0.0;
@@ -242,6 +243,11 @@ void modbusTask(void* pvParams) {
     for (;;) {
         esp_task_wdt_reset();
 
+        if (mountLinkPaused) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
         MountCommand cmd;
         if (xQueueReceive(mountCommandQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (cmd.type != MountCommandType::GOTO) {
@@ -293,6 +299,9 @@ void modbusTask(void* pvParams) {
             bool warnedTrackingWithoutSlewing = false;
             for (int i = 0; i < MAX_POLL; i++) {
                 esp_task_wdt_reset();
+                if (mountLinkPaused) {
+                    break;
+                }
                 vTaskDelay(pdMS_TO_TICKS(100));
 
                 readPositionFromModbus();
@@ -389,6 +398,10 @@ bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStat
 
 void mountLinkStartTask(BaseType_t taskCore) {
     xTaskCreatePinnedToCore(modbusTask, "modbus", 4096, nullptr, 1, nullptr, taskCore);
+}
+
+void mountLinkSetPaused(bool paused) {
+    mountLinkPaused = paused;
 }
 
 void mountLinkReadSTM32FirmwareVersion() {

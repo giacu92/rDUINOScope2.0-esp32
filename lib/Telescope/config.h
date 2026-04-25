@@ -38,9 +38,14 @@ static const char* const ESP32_FIRMWARE_NAME = "Alice EQ";
 static const char* const WIFI_SSID     = secrets.getSSID();
 static const char* const WIFI_PASSWORD = secrets.getPassword();
 
+// ArduinoOTA network firmware updates. Leave OTA_PASSWORD empty to allow
+// passwordless uploads on trusted local networks.
+static const char* const OTA_HOSTNAME  = "rduinoscope-esp32";
+static const char* const OTA_PASSWORD  = "";
+
 // ── Mechanical parameters ─────────────────────────────────────────────────
 constexpr uint16_t GEAR_TEETH      = 144;
-constexpr uint16_t MOTOR_STEPS     = 200;
+constexpr uint16_t MOTOR_STEPS     = 200; 
 constexpr uint16_t MICROSTEPPING   = 16;
 
 // ── Stellarium Config ─────────────────────────────────────────────────────

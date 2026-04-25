@@ -371,6 +371,27 @@ pio device monitor
 
 The configured upload speed is `921600`.
 
+## OTA Updates
+
+The ESP32 starts ArduinoOTA after a successful WiFi connection. When an OTA
+upload starts, the firmware closes the active Stellarium client and pauses
+non-essential application work while the flash update is in progress. The
+default network name is configured in `lib/Telescope/config.h`:
+
+```cpp
+static const char* const OTA_HOSTNAME = "rduinoscope-esp32";
+```
+
+The first flash still needs USB. After that, use the OTA PlatformIO environment
+while the controller is on the same network:
+
+```bash
+pio run -e esp32-s3-devkitc-1-ota -t upload
+```
+
+If `OTA_PASSWORD` is set in `config.h`, add the same password to the OTA upload
+flags before uploading.
+
 ## Dependencies
 
 The project uses:
