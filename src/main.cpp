@@ -117,6 +117,8 @@ void    syncNTP();
 void    handleStellarium();
 void    processLX200Command(const String &cmd);
 void    sendResponse(const String &res);
+void    formatLX200RA(char* out, size_t outSize, double ra_h);
+void    formatLX200Dec(char* out, size_t outSize, double dec_deg);
 bool    executeGoto();
 void    parseStelBinaryPacket(uint8_t* buf, int len);
 void    sendCurrentPosition(WiFiClient& client);
@@ -799,7 +801,8 @@ void processLX200Command(const String &cmd) {
     // --- GET DEC ---
     else if (cmd.startsWith(":GD#")) {
         lx200Ready = true;   // FIX [13]
-        telescope.getLX200Dec(reply);
+        MountLinkSnapshot state = mountLinkGetSnapshot();
+        formatLX200Dec(reply, sizeof(reply), state.dec_deg);
         sendResponse(reply);
     }
     // --- GET LOCAL TIME ---
@@ -833,7 +836,8 @@ void processLX200Command(const String &cmd) {
     // --- GET RA ---
     else if (cmd.startsWith(":GR#")) {
         lx200Ready = true;   // FIX [13]: handshake superato, ora possiamo inviare posizione
-        telescope.getLX200RA(reply);
+        MountLinkSnapshot state = mountLinkGetSnapshot();
+        formatLX200RA(reply, sizeof(reply), state.ra_h);
         sendResponse(reply);
     }
     // --- GET AZIMUTH :GZ# (richiesto da alcuni client durante handshake) FIX [12] ---
@@ -1076,6 +1080,52 @@ void sendResponse(const String &res) {
         stelClient.flush();
         if (DEBUG_LX200_FULL) { Serial.print("[SEND] "); Serial.println(res); }
     }
+}
+
+// =============================================================================
+//  LX200 coordinate formatting from mount snapshots
+// =============================================================================
+void formatLX200RA(char* out, size_t outSize, double ra_h) {
+    if (!out || outSize == 0) return;
+
+    double normalizedRA = fmod(ra_h, 24.0);
+    if (normalizedRA < 0) normalizedRA += 24.0;
+
+    double totalSeconds = normalizedRA * 3600.0;
+    int h = (int)(totalSeconds / 3600);
+    totalSeconds -= h * 3600;
+
+    int m = (int)(totalSeconds / 60);
+    int s = (int)round(totalSeconds - m * 60);
+
+    if (s == 60) { s = 0; m++; }
+    if (m == 60) { m = 0; h++; }
+    if (h == 24) h = 0;
+
+    snprintf(out, outSize, "%02d:%02d:%02d#", h, m, s);
+}
+
+void formatLX200Dec(char* out, size_t outSize, double dec_deg) {
+    if (!out || outSize == 0) return;
+
+    double normalizedDec = dec_deg;
+    if (normalizedDec > 90.0) normalizedDec = 90.0;
+    if (normalizedDec < -90.0) normalizedDec = -90.0;
+
+    char sign = (normalizedDec >= 0) ? '+' : '-';
+    double absDec = fabs(normalizedDec);
+    double totalSeconds = absDec * 3600.0;
+
+    int d = (int)(totalSeconds / 3600);
+    totalSeconds -= d * 3600;
+
+    int m = (int)(totalSeconds / 60);
+    int s = (int)round(totalSeconds - m * 60);
+
+    if (s == 60) { s = 0; m++; }
+    if (m == 60) { m = 0; d++; }
+
+    snprintf(out, outSize, "%c%02d*%02d'%02d#", sign, d, m, s);
 }
 
 // =============================================================================

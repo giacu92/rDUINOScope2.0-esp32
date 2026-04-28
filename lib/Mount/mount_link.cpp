@@ -40,12 +40,18 @@ bool jogActive = false;
 
 double currentRA_h = 0.0;
 double currentDEC_deg = 0.0;
+State currentStatus = State::IDLE;
+bool currentIsSlewing = false;
+bool currentMotorsEnabled = false;
+bool currentTrackingEnabled = false;
+TrackingMode currentTrackingMode = TrackingMode::SIDEREAL;
+uint16_t currentSTM32FirmwareVersion = 0;
 MountLinkSnapshot mountStateSnapshot = {
     0.0,
     0.0,
     State::IDLE,
     false,
-    true,
+    false,
     false,
     0,
     0
@@ -60,16 +66,16 @@ void notifyChanged() {
 }
 
 void publishMountStateSnapshot() {
-    if (!mountStateMutex || !telescopeRef) return;
+    if (!mountStateMutex) return;
 
     MountLinkSnapshot snapshot = {
         currentRA_h,
         currentDEC_deg,
-        telescopeRef->status,
-        telescopeRef->isSlewing,
-        telescopeRef->motorsEnabled,
-        telescopeRef->trackingEnabled,
-        telescopeRef->stm32FirmwareVersion,
+        currentStatus,
+        currentIsSlewing,
+        currentMotorsEnabled,
+        currentTrackingEnabled,
+        currentSTM32FirmwareVersion,
         millis()
     };
 
@@ -148,8 +154,8 @@ void clearLocalMotionRequests() {
     followTargetActive = false;
     jogActive = false;
 
-    telescopeRef->setSlewing(false);
-    telescopeRef->trackingEnabled = false;
+    currentIsSlewing = false;
+    currentTrackingEnabled = false;
     publishMountStateSnapshot();
 }
 
@@ -166,10 +172,10 @@ bool applyStopRequest() {
                 esp_task_wdt_reset();
             }
             readPositionFromModbus();
-            if (telescopeRef->status == State::IDLE) {
+            if (currentStatus == State::IDLE) {
                 return true;
             }
-            if (telescopeRef->status == State::ERROR) {
+            if (currentStatus == State::ERROR) {
                 return false;
             }
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -189,7 +195,7 @@ bool readSTM32FirmwareVersion() {
 
     uint8_t result = modbus.readHoldingRegisters(REG_RES_STM32_FW_VERSION, 1);
     if (result != modbus.ku8MBSuccess) {
-        telescopeRef->stm32FirmwareVersion = 0xFFFF;
+        currentSTM32FirmwareVersion = 0xFFFF;
         publishMountStateSnapshot();
         if (DEBUG_LX200_FULL) {
             Serial.printf("[Modbus] Errore lettura versione STM32: 0x%02X\n", result);
@@ -197,12 +203,12 @@ bool readSTM32FirmwareVersion() {
         return false;
     }
 
-    telescopeRef->stm32FirmwareVersion = modbus.getResponseBuffer(0);
+    currentSTM32FirmwareVersion = modbus.getResponseBuffer(0);
     publishMountStateSnapshot();
     if (DEBUG_LX200_FULL) {
-        Serial.printf("[Modbus] STM32 FW=0x%04X\n", telescopeRef->stm32FirmwareVersion);
+        Serial.printf("[Modbus] STM32 FW=0x%04X\n", currentSTM32FirmwareVersion);
     }
-    return telescopeRef->stm32FirmwareVersion != 0xFFFF;
+    return currentSTM32FirmwareVersion != 0xFFFF;
 }
 
 void readPositionFromModbus() {
@@ -210,7 +216,7 @@ void readPositionFromModbus() {
 
     uint8_t result = modbus.readHoldingRegisters(REG_RES_STATUS, 5);
     if (result == modbus.ku8MBSuccess) {
-        telescopeRef->status = static_cast<State>(modbus.getResponseBuffer(0) & 0xF);
+        currentStatus = static_cast<State>(modbus.getResponseBuffer(0) & 0xF);
 
         int32_t ra_arcsec100 = (int32_t)((uint32_t)modbus.getResponseBuffer(1) << 16
                                         | (uint32_t)modbus.getResponseBuffer(2));
@@ -219,15 +225,13 @@ void readPositionFromModbus() {
 
         currentRA_h = (ra_arcsec100 / 100.0) / 3600.0 / 15.0;
         currentDEC_deg = (dec_arcsec100 / 100.0) / 3600.0;
-        telescopeRef->ra = currentRA_h;
-        telescopeRef->dec = currentDEC_deg;
-        telescopeRef->isSlewing = (telescopeRef->status == State::SLEWING)
-                               || (telescopeRef->status == State::MANUAL_JOG);
+        currentIsSlewing = (currentStatus == State::SLEWING)
+                        || (currentStatus == State::MANUAL_JOG);
         publishMountStateSnapshot();
 
         if (DEBUG_LX200_FULL) {
             Serial.printf("[Modbus] Status=%d RA=%.4fh DEC=%.4fdeg\n",
-                          (int)telescopeRef->status, currentRA_h, currentDEC_deg);
+                          (int)currentStatus, currentRA_h, currentDEC_deg);
         }
     } else if (DEBUG_LX200_MODBUS) {
         Serial.printf("[Modbus] Errore lettura posizione: 0x%02X\n", result);
@@ -254,7 +258,8 @@ void applyMountCommand(const MountCommand& cmd) {
                 result = writeCommandRequest(CMD_SET_TRACKING) ? modbus.ku8MBSuccess : 0xFF;
             }
             if (result == modbus.ku8MBSuccess) {
-                telescopeRef->trackingEnabled = (cmd.value1 != 0);
+                currentTrackingEnabled = (cmd.value1 != 0);
+                currentTrackingMode = static_cast<TrackingMode>(cmd.value2);
                 publishMountStateSnapshot();
             }
             break;
@@ -263,6 +268,13 @@ void applyMountCommand(const MountCommand& cmd) {
             result = modbus.writeSingleRegister(REG_REQ_MOTORS_ENABLE, cmd.value1);
             if (result == modbus.ku8MBSuccess) {
                 result = writeCommandRequest(CMD_SET_MOTORS) ? modbus.ku8MBSuccess : 0xFF;
+            }
+            if (result == modbus.ku8MBSuccess) {
+                currentMotorsEnabled = (cmd.value1 != 0);
+                if (!currentMotorsEnabled) {
+                    currentIsSlewing = false;
+                }
+                publishMountStateSnapshot();
             }
             break;
 
@@ -279,7 +291,7 @@ void applyMountCommand(const MountCommand& cmd) {
             }
             if (result == modbus.ku8MBSuccess) {
                 jogActive = true;
-                telescopeRef->setSlewing(true);
+                currentIsSlewing = true;
                 publishMountStateSnapshot();
             }
             break;
@@ -288,7 +300,7 @@ void applyMountCommand(const MountCommand& cmd) {
             result = writeCommandRequest(CMD_JOG_STOP) ? modbus.ku8MBSuccess : 0xFF;
             if (result == modbus.ku8MBSuccess) {
                 jogActive = false;
-                telescopeRef->setSlewing(false);
+                currentIsSlewing = false;
                 publishMountStateSnapshot();
             }
             break;
@@ -347,8 +359,8 @@ void modbusTask(void* pvParams) {
                 if (DEBUG_LX200_MODBUS) {
                     Serial.printf("[Modbus] Errore scrittura: 0x%02X\n", result);
                 }
-                telescopeRef->status = State::IDLE;
-                telescopeRef->setSlewing(false);
+                currentStatus = State::IDLE;
+                currentIsSlewing = false;
                 publishMountStateSnapshot();
                 continue;
             }
@@ -358,12 +370,14 @@ void modbusTask(void* pvParams) {
                 if (DEBUG_LX200_MODBUS) {
                     Serial.printf("[Modbus] Errore pending GOTO: 0x%02X\n", pendingResult);
                 }
-                telescopeRef->status = State::IDLE;
-                telescopeRef->setSlewing(false);
+                currentStatus = State::IDLE;
+                currentIsSlewing = false;
                 publishMountStateSnapshot();
                 continue;
             }
 
+            currentStatus = State::SLEWING;
+            currentIsSlewing = true;
             gotoActive = true;
             publishMountStateSnapshot();
 
@@ -391,15 +405,15 @@ void modbusTask(void* pvParams) {
 
                 readPositionFromModbus();
 
-                if (telescopeRef->status == State::SLEWING) {
+                if (currentStatus == State::SLEWING) {
                     sawSlewing = true;
-                } else if (telescopeRef->status == State::TRACKING) {
+                } else if (currentStatus == State::TRACKING) {
                     if (sawSlewing || currentPositionMatchesTarget(cmd.ra_arcsec100, cmd.dec_arcsec100)) {
                         if (DEBUG_LX200_MODBUS) {
                             Serial.println("[Modbus] GOTO completato, tracking attivo.");
                         }
-                        telescopeRef->status = State::TRACKING;
-                        telescopeRef->setSlewing(false);
+                        currentStatus = State::TRACKING;
+                        currentIsSlewing = false;
                         gotoActive = false;
                         publishMountStateSnapshot();
                         gotoFinished = true;
@@ -410,23 +424,23 @@ void modbusTask(void* pvParams) {
                         Serial.println("[Modbus] TRACKING letto senza SLEWING: attendo avvio reale GOTO.");
                         warnedTrackingWithoutSlewing = true;
                     }
-                } else if (telescopeRef->status == State::ERROR) {
+                } else if (currentStatus == State::ERROR) {
                     if (DEBUG_LX200_MODBUS) {
                         Serial.println("[Modbus] STM32 ha riportato errore GOTO.");
                     }
-                    telescopeRef->status = State::ERROR;
-                    telescopeRef->setSlewing(false);
+                    currentStatus = State::ERROR;
+                    currentIsSlewing = false;
                     gotoActive = false;
                     publishMountStateSnapshot();
                     gotoFinished = true;
                     break;
-                } else if (telescopeRef->status == State::IDLE) {
+                } else if (currentStatus == State::IDLE) {
                     if (i > 2) {
                         if (DEBUG_LX200_MODBUS) {
                             Serial.println("[Modbus] STM32 IDLE durante GOTO, uscita.");
                         }
-                        telescopeRef->status = State::IDLE;
-                        telescopeRef->setSlewing(false);
+                        currentStatus = State::IDLE;
+                        currentIsSlewing = false;
                         gotoActive = false;
                         publishMountStateSnapshot();
                         gotoFinished = true;
@@ -439,8 +453,8 @@ void modbusTask(void* pvParams) {
                 if (DEBUG_LX200_MODBUS) {
                     Serial.println("[Modbus] Timeout polling STM32.");
                 }
-                telescopeRef->status = State::IDLE;
-                telescopeRef->setSlewing(false);
+                currentStatus = State::IDLE;
+                currentIsSlewing = false;
                 gotoActive = false;
                 publishMountStateSnapshot();
             }
@@ -475,8 +489,8 @@ bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStat
     if (stm32Ready) {
         stopped = applyStopRequest();
         if (stopped) {
-            telescopeRef->status = State::IDLE;
-            telescopeRef->setSlewing(false);
+            currentStatus = State::IDLE;
+            currentIsSlewing = false;
         } else if (DEBUG_LX200_MODBUS) {
             Serial.println("[Modbus] Errore invio STOP iniziale.");
         }
@@ -517,20 +531,13 @@ bool mountLinkRequestGoto(double targetRA_h, double targetDEC_deg) {
                       targetRA_h, targetDEC_deg, (long)ra_arcsec100, (long)dec_arcsec100);
     }
 
-    telescopeRef->status = State::SLEWING;
-    telescopeRef->setSlewing(true);
-
     MountCommand cmd = {MountCommandType::GOTO, ra_arcsec100, dec_arcsec100, 0, 0, 0};
     if (!enqueueMountCommand(cmd, pdMS_TO_TICKS(100))) {
         if (DEBUG_LX200) {
             Serial.println("[WARN] Coda GOTO piena, comando scartato.");
         }
-        telescopeRef->status = State::IDLE;
-        telescopeRef->setSlewing(false);
-        publishMountStateSnapshot();
         return false;
     }
-    publishMountStateSnapshot();
     return true;
 }
 
@@ -538,9 +545,10 @@ bool mountLinkRequestStop() {
     if (!telescopeRef) return false;
 
     MountCommand cmd = {MountCommandType::STOP, 0, 0, 0, 0, 0};
+    if (!enqueuePriorityMountCommand(cmd)) return false;
+
     urgentStopRequested = true;
-    clearLocalMotionRequests();
-    return enqueuePriorityMountCommand(cmd);
+    return true;
 }
 
 bool mountLinkRequestTrackingEnabled(bool enabled) {
@@ -551,12 +559,10 @@ bool mountLinkRequestTrackingEnabled(bool enabled) {
         0,
         0,
         static_cast<uint16_t>(enabled ? 1U : 0U),
-        static_cast<uint16_t>(telescopeRef->trackingMode),
+        static_cast<uint16_t>(currentTrackingMode),
         0
     };
     if (enqueueMountCommand(cmd)) {
-        telescopeRef->trackingEnabled = enabled;
-        publishMountStateSnapshot();
         return true;
     }
     return false;
@@ -569,13 +575,11 @@ bool mountLinkRequestTrackingMode(TrackingMode mode) {
         MountCommandType::SET_TRACKING,
         0,
         0,
-        static_cast<uint16_t>(telescopeRef->trackingEnabled ? 1U : 0U),
+        static_cast<uint16_t>(currentTrackingEnabled ? 1U : 0U),
         static_cast<uint16_t>(mode),
         0
     };
     if (enqueueMountCommand(cmd)) {
-        telescopeRef->trackingMode = mode;
-        publishMountStateSnapshot();
         return true;
     }
     return false;
@@ -586,9 +590,6 @@ bool mountLinkRequestMotorsEnabled(bool enabled) {
 
     MountCommand cmd = {MountCommandType::SET_MOTORS, 0, 0, static_cast<uint16_t>(enabled ? 1U : 0U), 0, 0};
     if (enqueueMountCommand(cmd)) {
-        telescopeRef->motorsEnabled = enabled;
-        if (!enabled) telescopeRef->setSlewing(false);
-        publishMountStateSnapshot();
         return true;
     }
     return false;
