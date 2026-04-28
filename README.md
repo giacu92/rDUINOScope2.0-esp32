@@ -1,448 +1,341 @@
-# rDUINOScope 2.0 - ESP32-S3 Interface Firmware
+# rDUINOScope 2.0 ESP32-S3 Interface Firmware
 
-This repository contains the ESP32-S3 side of the rDUINOScope 2.0 controller.
-The full system is split across two MCUs: the ESP32-S3 handles WiFi,
-Stellarium connectivity, LX200 compatibility, time synchronization, and user
-facing status; the STM32F401 runs the time-critical motor control loop.
+This repository contains the ESP32-S3 firmware for the rDUINOScope 2.0
+controller.
 
-The split is intentional. WiFi and TCP traffic can introduce latency and task
-scheduling jitter, while stepper pulse generation needs deterministic timing.
-The ESP32 therefore acts as the network-facing master and exchanges compact
-position and command data with the STM32 over Modbus RTU.
+The system is intentionally split across two MCUs:
 
-## Main Responsibilities
+- The ESP32-S3 owns WiFi, OTA updates, Stellarium/LX200 connectivity, local UI,
+  touch input, display rendering, time sources, user configuration, and high
+  level mount commands.
+- The STM32F401 owns deterministic mount control: step generation, tracking,
+  acceleration/deceleration, motor safety, stop behavior, and real machine
+  state.
 
-The firmware exposes a TCP telescope server on port `10003` for Stellarium and
-compatible clients. It supports both Stellarium Desktop and Stellarium Mobile on
-the same port:
+That boundary is the core design decision. The ESP32 is allowed to run rich and
+occasionally non-deterministic services; the STM32 remains responsible for all
+time-critical motion.
+
+## Project Shape
+
+The current firmware is the network/UI side of the controller, not a complete
+standalone telescope mount firmware. It is designed to work with the matching
+rDUINOScope 2.0 STM32 firmware over Modbus RTU.
+
+Implemented today:
+
+- TCP telescope server on port `10003`;
+- automatic protocol detection between Stellarium Desktop binary packets and
+  LX200 ASCII commands;
+- LX200 command handling for common Stellarium/SkySafari flows;
+- NTP time synchronization;
+- ArduinoOTA after WiFi connection;
+- Modbus RTU master link to STM32;
+- mount command queue for GOTO, STOP, tracking, motors, and jog intents;
+- boot diagnostics screen;
+- main display screen with WiFi, client, STM32 firmware, and mount state;
+- LovyanGFX display service for SPI TFT and XPT2046 touch;
+- debounced touch task with press/release events;
+- basic UI routing and soft-button pages;
+- onboard WS2812 status LED;
+- night-mode palette input through an active-low GPIO.
+
+Planned or incomplete areas:
+
+- SD storage and local catalogs;
+- GPS and external RTC;
+- BME280/environment data;
+- battery measurement;
+- joystick/manual control UI;
+- alignment workflow;
+- meridian flip workflow;
+- full options screen;
+- session logging and observation reports;
+- UI-driven firmware/catalog updates.
+
+## Design Principles
+
+The codebase should stay modular because this project is a port from a much more
+monolithic legacy firmware.
+
+Guidelines:
+
+- ESP32 never generates step pulses.
+- UI code publishes user intent; it must not directly manipulate motor timing or
+  Modbus registers inside rendering code.
+- STM32 state is treated as authoritative for movement and current position.
+- STOP and motors-off paths must remain priority paths.
+- Slow work should run outside the TCP loop.
+- Blocking hardware operations should live in tasks or short service calls.
+- Shared state should be copied through snapshots or small APIs, not read
+  cross-module as mutable globals.
+- Legacy features should be ported by behavior, not by copying `.ino` structure.
+- Protocol contracts should be documented near the code that owns them.
+
+## Runtime Architecture
+
+| Area | Path | Responsibility |
+| --- | --- | --- |
+| Application | `src/main.cpp` | startup, WiFi, OTA, TCP server, Stellarium/LX200 routing, task creation |
+| Mount link | `lib/Mount` | Modbus master, RS485 direction, command queue, STM32 polling, mount snapshot |
+| Display hardware | `lib/Display/display.*` | LovyanGFX setup, SPI TFT, XPT2046 touch, display mutex, backlight |
+| UI screens | `lib/Display/graphic_screens.*` | palette, boot/main/options screens, UI routing, high-level UI actions |
+| Touch input | `lib/Input` | touch IRQ wakeup, task-side touch reads, debounce, event queue |
+| Telescope model | `lib/Telescope` | configuration constants, LX200 formatting, controller clock, site coordinates |
+| System services | `lib/System` | optional diagnostics and slow board-level inputs |
+| Astronomy helpers | `lib/planetcalc.h` | approximate planetary calculations for future local features |
+
+The application layer should call APIs such as `mountLinkRequestGoto()` and
+`mountLinkRequestStop()`. It should not write Modbus registers directly.
+
+## Protocol Handling
+
+The ESP32 exposes one TCP server for both client families:
 
 - Stellarium Desktop uses the native binary telescope protocol.
-- Stellarium Mobile and similar clients use LX200-style ASCII commands over TCP.
+- Stellarium Mobile, SkySafari, and similar clients use LX200-style ASCII
+  commands over TCP.
 
-The protocol is detected automatically from the first received byte of a new TCP
-session. Binary packets are treated as Stellarium Desktop traffic; text commands
-are handled by the LX200 parser.
+The first byte of a new TCP session selects the protocol:
 
-The ESP32 also keeps local telescope state for the client-facing protocol layer:
-current RA/DEC, target RA/DEC, site coordinates, controller date/time, and
-slewing state. Actual motor movement and tracking are delegated to the STM32.
+- `0x14` means a 20-byte Stellarium Desktop binary GOTO packet;
+- anything else is handled as LX200 ASCII.
 
-## Hardware Target
+The LX200 path keeps target RA/DEC separately from current position. A GOTO is
+accepted after both target coordinates have been received, then forwarded to the
+STM32 through the mount link queue.
 
-The current PlatformIO environment targets:
+## Mount Boundary
 
-```ini
-board = esp32-s3-devkitc-1
-framework = arduino
-```
+The ESP32 and STM32 communicate over Modbus RTU:
 
-The expected board is an ESP32-S3 DevKitC-1 style module with an onboard
-WS2812/NeoPixel RGB LED on GPIO 48.
+- port: `Serial2`;
+- baudrate: `57600`;
+- slave ID: `1`;
+- RS485 direction pin: `RS485_DE_PIN`.
 
-Important ESP32 pin assignments are defined in `lib/Telescope/config.h`:
+The register map is compact by design. ESP32-owned registers are requests;
+STM32-owned registers are responses.
 
-| Function | GPIO | Notes |
-| :-- | :-- | :-- |
-| Modbus TX | 17 | ESP32 UART TX toward STM32/RS485 side |
-| Modbus RX | 16 | ESP32 UART RX from STM32/RS485 side |
-| RS485 DE | 4 | Driver enable, active HIGH |
-| RGB LED | 48 | Onboard WS2812/NeoPixel status LED |
-| Night mode input | 8 | Active-low input with internal pull-up; GND forces night palette |
-| TFT SCLK | 10 | Provisional SPI clock for ILI9341/ILI9488 |
-| TFT MOSI | 11 | Provisional SPI MOSI for display/touch |
-| TFT MISO | 46 | Provisional SPI MISO for touch/display reads |
-| TFT CS | 14 | Provisional display chip select |
-| TFT DC | 12 | Provisional display data/command |
-| TFT RST | 13 | Provisional display reset |
-| TFT BL | 9 | Provisional backlight PWM |
-| Touch CS | 15 | Provisional XPT2046 chip select |
-| Touch IRQ | 18 | Provisional XPT2046 interrupt |
+| Register | Name | Owner | Meaning |
+| --- | --- | --- | --- |
+| 0 | `REG_REQ_TARGET_RA_HIGH` | ESP32 writes | target RA high word |
+| 1 | `REG_REQ_TARGET_RA_LOW` | ESP32 writes | target RA low word |
+| 2 | `REG_REQ_TARGET_DEC_HIGH` | ESP32 writes | target DEC high word |
+| 3 | `REG_REQ_TARGET_DEC_LOW` | ESP32 writes | target DEC low word |
+| 4 | `REG_REQ_COMMAND` | ESP32 writes | requested command |
+| 5 | `REG_RES_STATUS` | STM32 writes | current mount state |
+| 6 | `REG_RES_CURRENT_RA_HIGH` | STM32 writes | current RA high word |
+| 7 | `REG_RES_CURRENT_RA_LOW` | STM32 writes | current RA low word |
+| 8 | `REG_RES_CURRENT_DEC_HIGH` | STM32 writes | current DEC high word |
+| 9 | `REG_RES_CURRENT_DEC_LOW` | STM32 writes | current DEC low word |
+| 10 | `REG_RES_ERROR_CODE` | STM32 writes | current error code |
+| 11 | `REG_REQ_TRACKING_ENABLE` | ESP32 writes | tracking on/off intent |
+| 12 | `REG_REQ_TRACKING_MODE` | ESP32 writes | lunar/sidereal/solar mode |
+| 13 | `REG_REQ_MOTORS_ENABLE` | ESP32 writes | motors enable intent |
+| 14 | `REG_REQ_JOG_AXIS` | ESP32 writes | RA or DEC jog axis |
+| 15 | `REG_REQ_JOG_DIRECTION` | ESP32 writes | jog direction |
+| 16 | `REG_REQ_JOG_SPEED` | ESP32 writes | STM32-defined jog profile |
+| 17 | `REG_REQ_COMMAND_PENDING` | ESP32 sets, STM32 clears | command handshake |
+| 18 | `REG_RES_STM32_FW_VERSION` | STM32 writes | packed STM32 firmware version |
 
-Modbus runs on `Serial2` at `57600` baud, using slave ID `1` on the STM32 side.
+Command values:
 
-The display/touch pins are current bench defaults and must be checked against
-the final wiring. GPIO 4 is intentionally avoided for touch chip select because
-it is already used by RS485 driver enable.
+| Value | Command | Intent |
+| --- | --- | --- |
+| 0 | `CMD_NONE` | no command |
+| 1 | `CMD_GOTO` | slew to target |
+| 2 | `CMD_STOP` | priority stop |
+| 3 | `CMD_SYNC` | reserved for sync compatibility |
+| 4 | `CMD_FOLLOW_TARGET` | reserved for STM32 compatibility |
+| 5 | `CMD_SET_TRACKING` | apply tracking enable/mode |
+| 6 | `CMD_SET_MOTORS` | apply motor power intent |
+| 7 | `CMD_JOG_START` | begin manual jog |
+| 8 | `CMD_JOG_STOP` | stop manual jog |
 
-## WiFi and Time
-
-WiFi credentials are read from `lib/Telescope/secrets.h` through the `Secrets`
-helper class. Keep real credentials local and avoid committing personal network
-details to a shared repository.
-
-After WiFi connects, the firmware synchronizes time through NTP:
-
-```cpp
-const char* NTP_SERVER = "pool.ntp.org";
-const long  GMT_OFFSET_SEC = 3600;
-const int   DAYLIGHT_OFFSET_SEC = 3600;
-```
-
-`Telescope` owns the controller's logical time as `controllerTime`. NTP and
-LX200 date/time commands both update that value, while the LX200 getters remain
-protocol wrappers around the same clock. When a client manually sets date or
-time, the firmware avoids overwriting the controller time immediately with
-NTP-derived time. A future DS3231 RTC service should read from and write to
-this controller clock rather than maintaining a separate LX200-only time model.
-
-## Status LED
-
-The onboard RGB LED is handled by a low-priority FreeRTOS task, separate from
-the main TCP loop. It currently reports WiFi state:
-
-| Color | Meaning |
-| :-- | :-- |
-| Red | WiFi disconnected or connecting |
-| Blue | WiFi connected |
-| Purple breathing at 0.25 Hz | Stellarium client connected |
-| Yellow | Reserved for future captive portal mode |
-
-Brightness is intentionally low:
-
-```cpp
-constexpr uint8_t RGB_LED_BRIGHTNESS = 16;  // about 6%
-```
-
-When captive portal support is added, it can switch the indicator with:
-
-```cpp
-setWifiLedState(WIFI_LED_CAPTIVE_PORTAL);
-```
-
-## Display And Touch
-
-The local UI layer uses LovyanGFX to drive an SPI TFT display and an
-XPT2046-compatible touch controller. The current bench setup uses an ILI9341
-panel; the intended larger UI can move back to ILI9488 by changing the
-LovyanGFX panel type and display geometry constants. The current firmware
-shows:
-
-- boot diagnostics screen immediately after serial startup;
-- per-device initialization status rows for touch, WiFi, time, reserved GPS and
-  sensor slots, Modbus/STM32, and the TCP server;
-- main screen with WiFi, IP, STM32 firmware, motors, and tracking state;
-- six soft buttons in a 2x3 grid in the lower third of the main screen.
-
-The display hardware service lives in `lib/Display/display.h` and
-`lib/Display/display.cpp`. That module owns LovyanGFX initialization, panel and
-touch configuration, the display mutex, touch reads, and backlight control.
-
-Graphical screens live in `lib/Display/graphic_screens.h` and
-`lib/Display/graphic_screens.cpp`. That layer owns the shared UI palette,
-day/night theme selection, reusable drawing helpers such as `drawHeader()`,
-`drawCpuLoad()`, and `drawBatteryLevel()`, and the current boot/init/main
-screen renderers. It also owns the current `ScreenType` selection used by the
-display task. Rendering code should use `uiColors()` rather than defining local
-color constants.
-
-Night mode can be forced by the `IS_NIGHT_MODE_PIN` digital input in
-`lib/Telescope/config.h`. The pin is configured as `INPUT_PULLUP`, so the
-default open/high state keeps the day palette; pulling it to GND selects the
-night palette. `system_inputs` samples this input once per second and requests
-a display refresh when the palette changes. The same task is the intended home
-for future slow board-level reads such as GPS, environmental sensors, and
-similar status inputs.
-
-Complete screen operations are named `displayShow*()` and own the display lock.
-Shared `draw*()` helpers are internal drawing primitives; they receive an
-already locked LovyanGFX device and must not be called from application code.
-Boot diagnostics are updated through:
-
-```cpp
-displayBootSetStatus(row, "WiFi", BootStatus::Running);
-displayBootSetStatus(row, "WiFi", BootStatus::Ok);
-```
-
-Reserved rows can use `BootStatus::Skip` until their hardware module exists.
-The XPT2046 check is exposed as `displayProbeTouch()`. It verifies that the
-touch driver/SPI path can be initialized; XPT2046 does not provide a stable
-chip-ID register like many I2C sensors.
-
-After boot, `displayTask` is responsible for rendering screens when visible
-state changes. Setup may draw the early boot and
-initialization screens before the task starts; from the main screen onward,
-other code should publish state or enqueue high-level UI actions instead of
-drawing directly. The task drains touch events and passes them into the
-graphical screen layer, which owns the current screen and hit testing in the
-same spirit as the legacy `considerTouchInput()` flow. The main screen has four
-rotating soft-button pages: mount, catalog, session, and system. Button 5, the
-center button on the lower row, advances to the next soft-button page. The
-mount page's button 1 emits a high-level mount STOP action. The options screen
-still exists only as a placeholder and is reachable from the system soft-button
-page.
-
-Touch input has its own path. The XPT2046 IRQ wakes `touchTask`, and that task
-reads coordinates outside the interrupt handler. The ISR only notifies the task:
-it does not use SPI, LovyanGFX, logging, or UI logic. Because display and touch
-share the same SPI/LovyanGFX device, the public display functions are protected
-by a short mutex. The touch task also keeps a slow idle fallback check and, once
-a press is active, samples until release so buttons get stable press and release
-events. Touch events are queued as `Pressed`/`Released` records with an
-80 ms per-event-type debounce before the display task consumes them.
-
-The touch input plumbing lives in `lib/Input/touch_input.h` and
-`lib/Input/touch_input.cpp`, keeping ISR and input-task details out of
-`src/main.cpp`.
-
-## Stellarium Command Flow
-
-For a GOTO request, the ESP32 receives a target from either protocol path:
-
-- `:Sr` and `:Sd` followed by `:MS#` from LX200 clients.
-- A 20-byte binary GOTO packet from Stellarium Desktop.
-
-The target is converted to the shared Modbus coordinate format:
+Coordinate packing:
 
 ```text
 RA  = hours * 15 * 3600 * 100
 DEC = degrees * 3600 * 100
 ```
 
-Those signed 32-bit values are split across two 16-bit request registers each.
-The ESP32 writes `REG_REQ_COMMAND=1`, then sets `REG_REQ_COMMAND_PENDING=1`.
+The resulting signed 32-bit values are split into high and low 16-bit words.
 
-The STM32 owns the actual movement. It performs acceleration, deceleration,
-tracking transition, and error handling. The ESP32 polls the STM32 status and
-position registers, then reports the current position back to Stellarium.
+Important rule: a repeated command is not represented by briefly pulsing
+`REG_REQ_COMMAND`. The ESP32 writes the command data and sets
+`REG_REQ_COMMAND_PENDING=1`; the STM32 clears that pending flag after consuming
+the command.
 
-The same boundary also carries high-level mount controls for the local UI:
-tracking enable/mode, motors enable/disable, and manual jog. The ESP32 still
-does not generate motor pulses; it only writes intent into Modbus registers.
-Registers named `REG_REQ_*` are Modbus Master-side requests; registers named
-`REG_RES_*` are Modbus Slave-side responses. The one deliberate exception is
-`REG_REQ_COMMAND_PENDING`: ESP32 sets it to `1` after writing a command, and
-STM32 clears that pending flag back to `0` after consuming the command.
-Starting with STM32 firmware `0xB004`, request registers are owned and
-maintained by the ESP32. STM32 reports real machine state only through `RES_*`
-registers and does not rewrite `REQ_*` values during STOP, GOTO, SYNC, or
-automatic tracking transitions.
+## STOP Semantics
 
-The STM32 firmware already defines `CMD_SYNC=3` and `CMD_FOLLOW_TARGET=4`; the
-ESP32 keeps those values reserved. Manual jog intentionally uses dedicated
-axis/direction/speed registers instead of `FOLLOW_TARGET`, so the STM32 remains
-responsible for jog speed profiles, acceleration, deceleration, limits, and
-safety handling.
+STOP is not modeled as "tracking disabled". It is an explicit priority command:
 
-## Modbus Register Boundary
+1. ESP32 writes `CMD_STOP`.
+2. ESP32 sets `REG_REQ_COMMAND_PENDING=1`.
+3. STM32 performs its own controlled stop/deceleration.
+4. ESP32 polls until the STM32 reports `IDLE` or `ERROR`.
+5. The final STM32 position registers become the authoritative reached position.
 
-The ESP32 and STM32 share this compact register map:
+This matters because tracking, GOTO, and manual jog have different mechanical
+meaning even if all of them can involve motor motion.
 
-| Register | Name | Direction from ESP32 view | Meaning |
-| :-- | :-- | :-- | :-- |
-| 0 | `REG_REQ_TARGET_RA_HIGH` | Write | Target RA high word |
-| 1 | `REG_REQ_TARGET_RA_LOW` | Write | Target RA low word |
-| 2 | `REG_REQ_TARGET_DEC_HIGH` | Write | Target DEC high word |
-| 3 | `REG_REQ_TARGET_DEC_LOW` | Write | Target DEC low word |
-| 4 | `REG_REQ_COMMAND` | Write | ESP32-owned command request/state |
-| 5 | `REG_RES_STATUS` | Read | STM32 state |
-| 6 | `REG_RES_CURRENT_RA_HIGH` | Read | Current RA high word |
-| 7 | `REG_RES_CURRENT_RA_LOW` | Read | Current RA low word |
-| 8 | `REG_RES_CURRENT_DEC_HIGH` | Read | Current DEC high word |
-| 9 | `REG_RES_CURRENT_DEC_LOW` | Read | Current DEC low word |
-| 10 | `REG_RES_ERROR_CODE` | Read | STM32 error code |
-| 11 | `REG_REQ_TRACKING_ENABLE` | Write | `0` off, `1` on |
-| 12 | `REG_REQ_TRACKING_MODE` | Write | `0` lunar, `1` sidereal, `2` solar |
-| 13 | `REG_REQ_MOTORS_ENABLE` | Write | `0` disabled, `1` enabled |
-| 14 | `REG_REQ_JOG_AXIS` | Write | `0` RA, `1` DEC |
-| 15 | `REG_REQ_JOG_DIRECTION` | Write | `0` negative/west/south, `1` positive/east/north |
-| 16 | `REG_REQ_JOG_SPEED` | Write | STM32-defined jog speed/profile |
-| 17 | `REG_REQ_COMMAND_PENDING` | Write/consume | ESP32 sets to `1`; STM32 clears to `0` after consuming `REG_REQ_COMMAND` |
-| 18 | `REG_RES_STM32_FW_VERSION` | Read | STM32 firmware version, packed as `0xMMmm` |
+## Display And UI
 
-Command values written to `REG_REQ_COMMAND`:
+The display stack uses LovyanGFX with an SPI TFT and XPT2046-compatible touch
+controller.
 
-| Value | Command |
-| :-- | :-- |
-| 0 | `CMD_NONE` |
-| 1 | `CMD_GOTO` |
-| 2 | `CMD_STOP` |
-| 3 | `CMD_SYNC` |
-| 4 | `CMD_FOLLOW_TARGET` |
-| 5 | `CMD_SET_TRACKING` |
-| 6 | `CMD_SET_MOTORS` |
-| 7 | `CMD_JOG_START` |
-| 8 | `CMD_JOG_STOP` |
+Current display behavior:
 
-`REG_REQ_COMMAND` may remain at the last requested command. A new command is
-signaled by setting `REG_REQ_COMMAND_PENDING=1`, so repeated identical commands
-do not depend on short timed pulses.
+- boot diagnostics show hardware/service startup state;
+- the main screen shows connection and mount state;
+- soft buttons are arranged as a 2x3 grid;
+- the center lower button rotates between soft-button pages;
+- mount STOP is available from the mount page and from the moving overlay;
+- night mode changes the palette from a board-level input.
 
-`REG_RES_STM32_FW_VERSION` stores the STM32 firmware version as `0xMMmm`, where
-the high byte is the major version and the low byte is the minor version. For
-example, `0x0200` means `2.0`.
+Display and touch share the same SPI/LovyanGFX device, so public display access
+is protected by a short mutex. Full screen operations are exposed as
+`displayShow*()` functions and own the display lock.
 
-`mountLinkBegin()` reads `REG_RES_STM32_FW_VERSION` during startup and returns
-`true` only when the Modbus transaction succeeds and the value is not `0xFFFF`.
-The boot diagnostics use that result to mark the STM32/Modbus row as `OK` or
-`FAIL`. `0xFFFF` is treated as the disconnected/default bus value.
+The screen module emits `UiAction` values instead of calling services directly.
+The application/display task consumes those actions and calls the relevant
+service API.
 
-`CMD_JOG_START` reads `REG_REQ_JOG_AXIS`, `REG_REQ_JOG_DIRECTION`, and
-`REG_REQ_JOG_SPEED`, then STM32 should enter `MANUAL_JOG` and move the requested
-axis until `CMD_JOG_STOP` or `CMD_STOP` arrives. `CMD_JOG_STOP` is the normal
-button-release path; `CMD_STOP` remains the priority abort path.
+## Touch Input
 
-ESP32 treats STOP as a priority command. UI and LX200 abort requests enqueue a
-high-level stop action, write `CMD_STOP`, and set `REG_REQ_COMMAND_PENDING=1`.
-STOP does not use `REG_REQ_TRACKING_ENABLE=0` as an implicit stop mechanism. If
-a GOTO is being polled, the Modbus task checks the pending stop flag during the
-poll loop so STM32 can start its own controlled stop/deceleration without
-waiting for the GOTO to complete. After sending STOP, ESP32 waits for
-`REG_RES_STATUS=IDLE`, then keeps the final `REG_RES_CURRENT_RA_*` and
-`REG_RES_CURRENT_DEC_*` position as the real reached position.
+The touch interrupt does not read SPI and does not run UI logic. It only wakes
+the touch task.
 
-Tracking enable/disable is explicit: ESP32 writes `REG_REQ_TRACKING_ENABLE` and
-`REG_REQ_TRACKING_MODE`, then writes `CMD_SET_TRACKING` and sets
-`REG_REQ_COMMAND_PENDING=1`.
+The task:
 
-State values mirror the STM32 firmware:
+- reads touch coordinates through the display service;
+- publishes debounced `Pressed` and `Released` events;
+- keeps sampling while a press is active;
+- lets the display/UI task decide what the event means.
 
-| Value | State |
-| :-- | :-- |
-| 0 | `IDLE` |
-| 1 | `SLEWING` |
-| 2 | `TRACKING` |
-| 3 | `ERROR` |
-| 4 | `MOTORS_DISABLED` |
-| 5 | `MANUAL_JOG` |
+This keeps interrupt work small and prevents rendering, logging, and SPI reads
+from happening inside the ISR.
 
-## FreeRTOS Layout
+## WiFi, OTA, And Time
 
-The firmware keeps blocking or slower work away from the main TCP loop:
+WiFi credentials are read from `lib/Telescope/secrets.h`. Real credentials
+should remain local and should not be committed.
 
-| Task / service | Core | Owner | Notes |
-| :-- | :-- | :-- | :-- |
-| `loopTask` / Arduino `loop()` | 1 | Arduino | Handles Stellarium TCP traffic plus periodic position packets. Pinned by `CONFIG_ARDUINO_RUNNING_CORE=1`. |
-| `displayTask` | 1 | Project | Renders screens only when a refresh is needed. |
-| `touchTask` | 1 | Project | Woken by the XPT2046 IRQ, then reads touch coordinates outside the ISR. |
-| `modbusTask` | 1 | Project | Owns all Modbus communication with the STM32. |
-| `statusLedTask` | 0 | Project | Low-priority RGB LED state updates. |
-| `system_inputs` | 0 | Project | Samples slow digital/system inputs once per second, currently the active-low night-mode pin. |
-| `cpu_load` | 0 | Project | Optional addon enabled with `ENABLE_CPU_LOAD_MONITOR`; samples FreeRTOS idle hooks for the display CPU indicator. |
-| `task_stats` | 0 | Project | Optional serial debug report when `ENABLE_FREERTOS_TASK_STATS` is enabled. |
-| WiFi task | 0 | ESP-IDF | Pinned by `CONFIG_ESP32_WIFI_TASK_PINNED_TO_CORE_0=y`. |
-| `tcpip_task` / lwIP | 0 | ESP-IDF | Pinned by `CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y`. |
-| Arduino event task | 1 | Arduino | Pinned by `CONFIG_ARDUINO_EVENT_RUNNING_CORE=1`. |
-| Arduino UDP task | 0 | Arduino | Pinned by `CONFIG_ARDUINO_UDP_RUNNING_CORE=0`. |
-| Idle tasks | 0 and 1 | FreeRTOS | One idle task per core. Used by `cpu_load` only when CPU load monitoring is enabled. |
-| FreeRTOS timer service | System | FreeRTOS | Present when timers are used; affinity is not explicitly pinned in this configuration. |
-| `esp_timer` internals | System | ESP-IDF | Used by ESP-IDF time/timer services; affinity is not explicitly pinned in this configuration. |
+After WiFi connects:
 
-GOTO commands are passed to the Modbus task through a FreeRTOS queue. This keeps
-the network path responsive while the STM32 is being polled for motion status.
-The Modbus task publishes a compact mount-state snapshot protected by a mutex;
-the TCP and display paths copy that snapshot briefly instead of reading live
-cross-core state directly.
+- the firmware starts ArduinoOTA;
+- NTP is used to initialize the controller clock;
+- the TCP telescope server accepts clients on `STEL_PORT`.
 
-The ESP32-to-STM32 Modbus boundary lives in `lib/Mount/mount_link.h` and
-`lib/Mount/mount_link.cpp`. That module owns `ModbusMaster`, RS485 direction
-control, the command queue, STM32 polling, and the mount-state snapshot.
-`src/main.cpp` calls high-level APIs such as `mountLinkRequestGoto(...)` and
-`mountLinkRequestStop()` instead of touching Modbus registers directly.
+The controller clock is owned by `Telescope`. NTP and LX200 date/time commands
+update the same logical clock. A future RTC service should read and write that
+same clock instead of introducing a second time model.
 
-The main screen can optionally show an indicative per-core CPU load in the
-top-right header area. This is disabled by default with
-`ENABLE_CPU_LOAD_MONITOR=false` in `lib/Telescope/config.h`, so the firmware
-does not register FreeRTOS idle hooks and does not create the `cpu_load` task.
-When enabled, `cpuLoadTask` samples FreeRTOS idle hooks once per second and
-updates only that small display region, avoiding a full-screen redraw. The
-numbers are useful for balancing tasks across cores, but they are an idle-time
-estimate rather than a precise profiler.
+OTA is manual through the PlatformIO OTA environment. During OTA, the firmware
+closes the active Stellarium client and pauses non-essential application work.
 
-CPU load monitoring lives in `lib/System/system_stats.h`. `src/main.cpp` calls
-`cpuLoadBegin(...)`, which is a no-op while `ENABLE_CPU_LOAD_MONITOR` is false.
+## Status LED
 
-For simple serial diagnostics, `ENABLE_FREERTOS_TASK_STATS` in `config.h` can
-enable a periodic debug report every `FREERTOS_TASK_STATS_INTERVAL_MS`
-milliseconds. The `task_stats` task, also defined in `system_stats.h`, prints
-the current task count and heap usage. If CPU load monitoring is enabled, the
-same report also includes the latest per-core load snapshot. It intentionally
-avoids the heavier FreeRTOS runtime stats APIs because the prebuilt
-Arduino-ESP32 framework does not link them.
+The onboard WS2812 LED reports high-level connection state:
+
+| State | Meaning |
+| --- | --- |
+| red | WiFi disconnected or connecting |
+| blue | WiFi connected |
+| purple breathing | Stellarium client connected |
+| yellow | reserved for future captive portal mode |
+
+Brightness is intentionally low to avoid a distracting controller box.
+
+## Hardware Target
+
+Primary PlatformIO environment:
+
+```ini
+[env:esp32-s3-devkitc-1]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+```
+
+Current expected peripherals:
+
+- ESP32-S3 DevKitC-1 style board;
+- onboard WS2812 on GPIO 48;
+- RS485 transceiver toward STM32;
+- SPI TFT, currently configured as ILI9341 bench hardware;
+- XPT2046 touch controller;
+- active-low night-mode input.
+
+Display/touch pins are current bench defaults and must match the final wiring.
+GPIO 4 is reserved for RS485 driver enable and should not be reused for touch
+chip select.
 
 ## Configuration Points
 
-Most project-level constants are in `lib/Telescope/config.h`:
+Most project constants live in `lib/Telescope/config.h`:
 
-- WiFi credential access
-- Debug flags
-- Optional diagnostics such as `ENABLE_CPU_LOAD_MONITOR` and
-  `ENABLE_FREERTOS_TASK_STATS`
-- Site latitude and longitude
-- Stellarium TCP port and update interval
-- NTP server and timezone offsets
-- Modbus baud rate, slave ID, and ESP32 pins
-- Active-low night-mode input pin
-- Onboard RGB LED pin and brightness
+- firmware identity;
+- debug flags;
+- optional diagnostics;
+- WiFi and OTA settings;
+- site coordinates;
+- Stellarium TCP port;
+- NTP server and offsets;
+- Modbus baudrate, slave ID, pins, registers, and command IDs;
+- display and touch pins;
+- night-mode input;
+- RGB LED pin and brightness.
 
-PlatformIO board and build options are in `platformio.ini`.
+PlatformIO board, build, upload, monitor, flash, PSRAM, and dependency settings
+live in `platformio.ini`.
 
-## Build and Upload
+## Build And Upload
 
-Build the firmware with PlatformIO:
+Build all environments:
 
 ```bash
 pio run
 ```
 
-Upload to the ESP32-S3:
+Upload over USB:
 
 ```bash
 pio run -t upload
 ```
 
-Open the serial monitor at `115200` baud:
+Open serial monitor:
 
 ```bash
 pio device monitor
 ```
 
-The configured upload speed is `921600`.
-
-## OTA Updates
-
-The ESP32 starts ArduinoOTA after a successful WiFi connection. When an OTA
-upload starts, the firmware closes the active Stellarium client and pauses
-non-essential application work while the flash update is in progress. The
-default network name is configured in `lib/Telescope/config.h`:
-
-```cpp
-static const char* const OTA_HOSTNAME = "rduinoscope-esp32";
-```
-
-The first flash still needs USB. After that, use the OTA PlatformIO environment
-while the controller is on the same network:
+Upload over OTA after the first USB flash:
 
 ```bash
 pio run -e esp32-s3-devkitc-1-ota -t upload
 ```
 
-If `OTA_PASSWORD` is set in `config.h`, add the same password to the OTA upload
-flags before uploading.
-
 ## Dependencies
 
-The project uses:
+Declared in `platformio.ini`:
 
-- `4-20ma/ModbusMaster` for Modbus RTU master communication.
-- `adafruit/Adafruit NeoPixel` for the onboard WS2812 status LED.
-- `lovyan03/LovyanGFX` for SPI TFT display and XPT2046 touch support.
-- Arduino ESP32 `WiFi` and time APIs.
+- `4-20ma/ModbusMaster`;
+- `adafruit/Adafruit NeoPixel`;
+- `lovyan03/LovyanGFX`;
+- Arduino ESP32 WiFi, OTA, time, and FreeRTOS facilities.
 
-Dependencies are declared in `platformio.ini`.
+## Development Notes
 
-## Current Limitations
+The most important next cleanup is not visual polish; it is hardening the
+interfaces:
 
-Captive portal provisioning is planned but not implemented yet. The yellow LED
-state is already reserved for that mode.
+- make LX200 parsing stricter and testable;
+- use mount snapshots for client-facing position reads;
+- keep UI state owned by the display task;
+- check RTOS resource creation failures;
+- verify board flash/PSRAM settings against real hardware;
+- add host-side tests for protocol parsing and coordinate conversion.
 
-The ESP32 currently assumes the STM32 register map and coordinate format used by
-the matching rDUINOScope 2.0 STM32 firmware. If the STM32 register layout
-changes, the constants in `config.h` and the Modbus packing code must be kept in
-sync.
-
-## Related Firmware
-
-This firmware is designed to work with the rDUINOScope 2.0 STM32F401 motor
-control firmware. The STM32 project documents the motor loop, driver handling,
-encoder support, hard stop behavior, and detailed Modbus slave implementation.
-This repository intentionally focuses on the ESP32 network and protocol side.
+The current review notes are in `CODE_REVIEW.md`.

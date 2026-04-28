@@ -1,86 +1,86 @@
 # Project Libraries
 
-This directory contains project-specific PlatformIO libraries used by the ESP32
-firmware.
+This directory contains project-specific PlatformIO libraries. Each library owns
+one clear part of the ESP32 firmware so the project does not grow back into a
+single legacy-style monolith.
 
 ## Display
 
-Display hardware and graphical screen rendering.
+`Display` is the hardware-facing graphics service:
 
-- `display.h` / `display.cpp` define the `Display` hardware service.
-- Configures the SPI TFT panel, backlight PWM, and XPT2046 touch device.
-- Protects display/touch access with a short mutex because both share SPI.
-- Exposes touch reads, backlight control, and controlled access to the LovyanGFX
-  device.
-- Exposes `displayProbeTouch()` for boot-time XPT2046 diagnostics.
-- Tracks the current backlight PWM duty value as an 8-bit brightness level
-  from `0` to `255`.
-- `graphic_screens.h` / `graphic_screens.cpp` define the UI rendering layer.
-- Owns the shared UI palette, day/night theme selection, reusable drawing
-  helpers, and the boot, initialization, main-screen, optional CPU-load, and
-  battery renderers.
-- Owns the current screen selection and the rotating main-screen soft-button
-  page state used by the display task.
-- Handles touch coordinates through a `considerTouchInput`-style path, keeping
-  screen-specific hit testing and routing out of `src/main.cpp`.
-- Publishes high-level UI actions such as mount STOP; application code consumes
-  those actions and calls the relevant service API.
-- Exposes `displayBootSetStatus()` so setup can update boot diagnostics without
-  reaching into internal `draw*` helpers.
+- initializes LovyanGFX;
+- configures the SPI TFT panel;
+- configures backlight PWM;
+- configures XPT2046 touch;
+- exposes controlled access to the LovyanGFX device;
+- protects display/touch bus access with a mutex.
+
+`graphic_screens` is the UI rendering and routing layer:
+
+- owns day/night palette selection;
+- renders boot, main, options placeholder, overlays, and small update regions;
+- owns the current screen route and main soft-button page;
+- converts touch coordinates into high-level `UiAction` values;
+- keeps service calls out of drawing functions.
+
+Implementation rule: drawing helpers draw only. Application effects such as
+STOP, tracking, WiFi, SD, or OTA must be handled by services outside rendering.
 
 ## Input
 
-Local input handling.
+`Input` owns local touch sampling:
 
-- Owns the touch task.
-- Uses the XPT2046 IRQ only to wake the task.
-- Reads touch coordinates outside the ISR through the Display API.
-- Publishes debounced `Pressed` and `Released` events through a FreeRTOS queue
-  so UI routing can stay outside the interrupt and touch sampling path.
+- the XPT2046 IRQ only wakes the task;
+- SPI touch reads happen outside the ISR;
+- press/release events are debounced;
+- events are queued for the display/UI layer.
+
+This keeps interrupt work short and avoids mixing input sampling with screen
+routing.
 
 ## Mount
 
-ESP32-to-STM32 mount link.
+`Mount` owns the ESP32-to-STM32 boundary:
 
-- Owns `ModbusMaster`, RS485 direction control, and `Serial2` setup.
-- Owns the mount command queue and Modbus FreeRTOS task.
-- Polls STM32 status/position registers and publishes a mount-state snapshot.
-- `mountLinkBegin()` returns whether the STM32 answered the firmware-version
-  register with a valid value instead of the disconnected `0xFFFF` value.
-- Exposes high-level APIs such as GOTO, STOP, tracking, motors, and jog.
-- Treats STOP as a priority request, including while a GOTO poll loop is active.
-- Follows the STM32 `0xB004` Modbus ownership rule: `REQ_*` registers are ESP32
-  intents, `RES_*` registers are STM32 state, and STOP is an explicit
-  `CMD_STOP`/pending handshake rather than an implicit tracking-disable write.
+- `ModbusMaster` setup;
+- RS485 driver-enable control;
+- command queue;
+- STM32 status/position polling;
+- mount state snapshot;
+- high-level APIs for GOTO, STOP, tracking, motors, and jog.
 
-## System
+The module publishes intent to STM32. It does not implement motor physics and
+does not generate pulses.
 
-Small system services.
-
-- `system_inputs` is the 1 Hz task for slow board-level inputs.
-- Currently samples the active-low night-mode input and refreshes the display
-  palette when it changes.
-- Contains optional CPU load monitoring behind `ENABLE_CPU_LOAD_MONITOR`.
-- When enabled, samples FreeRTOS idle hooks once per second.
-- Provides per-core load snapshots for the display header only when the monitor
-  is enabled.
-- Optionally prints serial runtime diagnostics.
+STOP is treated as a priority command and must stay independent from tracking
+enable/disable.
 
 ## Telescope
 
-Telescope protocol and configuration support.
+`Telescope` contains shared telescope state and LX200 formatting:
 
-- Holds shared firmware configuration constants and pin assignments.
-- Provides the `Telescope` state/model used by LX200/Stellarium handling.
-- Owns the controller logical clock through `controllerTime`; LX200 date/time
-  accessors wrap that same clock so future DS3231 support has a single source
-  of truth.
-- Includes local WiFi secrets integration through `secrets.h`.
+- controller logical clock;
+- site coordinates;
+- current object name;
+- current RA/DEC representation;
+- LX200 date/time/coordinate string helpers;
+- firmware identity and configuration access through `config.h`.
+
+This module should remain a state/model helper. Hardware IO belongs in service
+modules.
+
+## System
+
+`System` contains small board-level services:
+
+- slow system inputs such as night mode;
+- optional CPU load monitor;
+- optional FreeRTOS task/heap diagnostics.
+
+These features should stay optional and low priority.
 
 ## PlanetCalc
 
-Header-only approximate planetary position calculations.
-
-- `planetcalc.h` computes Sun, Moon, and planet RA/DEC plus auxiliary values
-  using Paul Schlyter-style orbital elements.
-- Intended for future local object/status calculations without dynamic memory.
+`planetcalc.h` is a header-only astronomy helper for future local object and
+planet calculations. It should remain independent from display, Modbus, WiFi,
+and storage so it can be tested on host builds.
