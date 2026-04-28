@@ -474,9 +474,6 @@ void displayTask(void* pvParams) {
             continue;
         }
 
-        bool uiChanged = handleDisplayTouchEvents();
-        handleDisplayActions();
-        uint32_t currentRouteRevision = displayGetRouteRevision();
         MountLinkSnapshot state = mountLinkGetSnapshot();
 #if ENABLE_CPU_LOAD_MONITOR
         CpuLoadSnapshot cpuLoad = cpuLoadGetSnapshot();
@@ -502,6 +499,11 @@ void displayTask(void* pvParams) {
         view.cpu0Load = 0;
         view.cpu1Load = 0;
 #endif
+
+        displaySetActiveOnScreenMsg(view.onScreenMsg);
+        bool uiChanged = handleDisplayTouchEvents();
+        handleDisplayActions();
+        uint32_t currentRouteRevision = displayGetRouteRevision();
 
         bool mainChanged = !hasRendered
                         || uiChanged

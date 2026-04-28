@@ -94,6 +94,7 @@ public:
     void advanceMainButtonPage();
 
     void registerTouch(UiTouchPhase phase, uint16_t x, uint16_t y, uint32_t atMs);
+    void setActiveOnScreenMsg(OnScreenMsg message);
     bool pollAction(UiAction& action);
     uint32_t getRouteRevision() const;
 
@@ -108,6 +109,7 @@ private:
     uint16_t lastTouchX = 0;
     uint16_t lastTouchY = 0;
     uint32_t lastTouchAtMs = 0;
+    OnScreenMsg activeOnScreenMsg = OnScreenMsg::None;
     UiAction pendingActions[4] = {};
     uint8_t pendingActionHead = 0;
     uint8_t pendingActionTail = 0;
@@ -123,6 +125,7 @@ const UiPalette& uiNightPalette();
 void displaySetNightMode(bool enabled);
 bool displayIsNightMode();
 bool displayConsiderTouchInput(UiTouchPhase phase, uint16_t x, uint16_t y, uint32_t atMs);
+void displaySetActiveOnScreenMsg(OnScreenMsg message);
 bool displayPollAction(UiAction& action);
 uint32_t displayGetRouteRevision();
 bool displayCanUpdateCpuLoadRegion();

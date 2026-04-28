@@ -70,6 +70,8 @@ constexpr int MAIN_BUTTON_GAP_X = 8;
 constexpr int MAIN_BUTTON_GAP_Y = 8;
 constexpr uint8_t MAIN_PAGE_BUTTON_NEXT = 5;
 constexpr uint8_t MAIN_PAGE_BUTTON_SYSTEM_OPTIONS = 6;
+constexpr int MOVING_STOP_BUTTON_W = 132;
+constexpr int MOVING_STOP_BUTTON_H = 34;
 
 bool beginScreenDraw(lgfx::LGFX_Device*& lcd) {
     Display& disp = display();
@@ -339,6 +341,16 @@ bool isOptionsBackButton(uint16_t x, uint16_t y) {
         && y <= TFT_HEIGHT - 24;
 }
 
+bool isMovingStopButton(uint16_t x, uint16_t y) {
+    const int left = (TFT_WIDTH - MOVING_STOP_BUTTON_W) / 2;
+    const int top = TFT_HEIGHT - 56;
+
+    return x >= left
+        && x < left + MOVING_STOP_BUTTON_W
+        && y >= top
+        && y < top + MOVING_STOP_BUTTON_H;
+}
+
 const char* bootStatusText(BootStatus status) {
     switch (status) {
         case BootStatus::Pending: return "WAIT";
@@ -473,6 +485,20 @@ void drawOnScreenMessage(lgfx::LGFX_Device& lcd, OnScreenMsg message, int8_t pro
         lcd.setFont(&fonts::DejaVu12);
         lcd.drawString(progressText, centerX, barY - 11);
     }
+
+    if (message == OnScreenMsg::Moving) {
+        const int buttonX = (lcd.width() - MOVING_STOP_BUTTON_W) / 2;
+        const int buttonY = lcd.height() - 56;
+        const uint16_t buttonFill = displayIsNightMode() ? c.background : TFT_RED;
+        const uint16_t buttonText = displayIsNightMode() ? c.warning : TFT_WHITE;
+
+        lcd.fillRect(buttonX, buttonY, MOVING_STOP_BUTTON_W, MOVING_STOP_BUTTON_H, buttonFill);
+        lcd.drawRect(buttonX, buttonY, MOVING_STOP_BUTTON_W, MOVING_STOP_BUTTON_H, buttonText);
+        lcd.drawRect(buttonX + 1, buttonY + 1, MOVING_STOP_BUTTON_W - 2, MOVING_STOP_BUTTON_H - 2, buttonText);
+        lcd.setFont(&fonts::DejaVu18);
+        lcd.setTextColor(buttonText, buttonFill);
+        lcd.drawString("STOP", buttonX + MOVING_STOP_BUTTON_W / 2, buttonY + MOVING_STOP_BUTTON_H / 2);
+    }
 }
 
 void drawBootStatusLine(lgfx::LGFX_Device& lcd, int8_t row, const char* label, BootStatus status) {
@@ -544,6 +570,11 @@ void UIManager::registerTouch(UiTouchPhase phase, uint16_t x, uint16_t y, uint32
         return;
     }
 
+    if (activeOnScreenMsg == OnScreenMsg::Moving && isMovingStopButton(lastTouchX, lastTouchY)) {
+        enqueueAction(UiAction::MountStop);
+        return;
+    }
+
     if (currentScreen == ScreenType::Main) {
         uint8_t button = mainButtonAt(lastTouchX, lastTouchY);
         if (button == MAIN_PAGE_BUTTON_NEXT) {
@@ -557,6 +588,10 @@ void UIManager::registerTouch(UiTouchPhase phase, uint16_t x, uint16_t y, uint32
     } else if (currentScreen == ScreenType::Options && isOptionsBackButton(lastTouchX, lastTouchY)) {
         setScreen(ScreenType::Main);
     }
+}
+
+void UIManager::setActiveOnScreenMsg(OnScreenMsg message) {
+    activeOnScreenMsg = message;
 }
 
 void UIManager::enqueueAction(UiAction action) {
@@ -619,6 +654,10 @@ bool displayConsiderTouchInput(UiTouchPhase phase, uint16_t x, uint16_t y, uint3
     uint32_t before = ui.getRouteRevision();
     ui.registerTouch(phase, x, y, atMs);
     return ui.getRouteRevision() != before;
+}
+
+void displaySetActiveOnScreenMsg(OnScreenMsg message) {
+    ui.setActiveOnScreenMsg(message);
 }
 
 bool displayPollAction(UiAction& action) {
