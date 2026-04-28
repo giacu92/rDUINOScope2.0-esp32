@@ -160,15 +160,14 @@ void clearLocalMotionRequests() {
     publishMountStateSnapshot();
 }
 
-bool applyStopRequest() {
+bool applyStopRequest(uint8_t maxStopPoll = 50) {
     if (!telescopeRef) return false;
 
     bool ok = writeCommandRequest(CMD_STOP);
     if (ok) {
         clearLocalMotionRequests();
 
-        constexpr uint8_t MAX_STOP_POLL = 50;
-        for (uint8_t attempt = 0; attempt < MAX_STOP_POLL; ++attempt) {
+        for (uint8_t attempt = 0; attempt < maxStopPoll; ++attempt) {
             if (modbusWatchdogRegistered) {
                 esp_task_wdt_reset();
             }
@@ -487,7 +486,8 @@ bool mountLinkBegin(Telescope& telescope, MountLinkChangedCallback onVisibleStat
     bool stm32Ready = readSTM32FirmwareVersion();
     bool stopped = false;
     if (stm32Ready) {
-        stopped = applyStopRequest();
+        constexpr uint8_t INIT_STOP_POLL_ATTEMPTS = 5;
+        stopped = applyStopRequest(INIT_STOP_POLL_ATTEMPTS);
         if (stopped) {
             currentStatus = State::IDLE;
             currentIsSlewing = false;
