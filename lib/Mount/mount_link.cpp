@@ -331,6 +331,15 @@ void modbusTask(void* pvParams) {
             continue;
         }
 
+        if (urgentStopRequested.exchange(false, std::memory_order_acq_rel)) {
+            bool stopped = applyStopRequest();
+            if (DEBUG_LX200_MODBUS) {
+                Serial.printf("[Modbus] STOP prioritario: %s.\n",
+                              stopped ? "ok" : "fallito");
+            }
+            continue;
+        }
+
         MountCommand cmd;
         if (xQueueReceive(mountCommandQueue, &cmd, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (cmd.type != MountCommandType::GOTO) {
@@ -547,8 +556,9 @@ bool mountLinkRequestStop() {
     MountCommand cmd = {MountCommandType::STOP, 0, 0, 0, 0, 0};
     urgentStopRequested.store(true, std::memory_order_release);
     if (!enqueuePriorityMountCommand(cmd)) {
-        urgentStopRequested.store(false, std::memory_order_release);
-        return false;
+        if (DEBUG_LX200_MODBUS) {
+            Serial.println("[Modbus] STOP queue full; using urgent stop slot.");
+        }
     }
     return true;
 }
