@@ -381,7 +381,7 @@ void modbusTask(void* pvParams) {
             gotoActive = true;
             publishMountStateSnapshot();
 
-            const int MAX_POLL = 3000;
+            const int MAX_POLL = MOUNT_GOTO_MAX_POLL_MS / 100;
             bool gotoFinished = false;
             bool sawSlewing = false;
             bool warnedTrackingWithoutSlewing = false;

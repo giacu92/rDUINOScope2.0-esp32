@@ -34,6 +34,10 @@ static const char* const ESP32_FIRMWARE_NAME = "Alice EQ";
 #define FREERTOS_TASK_STATS_INTERVAL_MS 5000
 #endif
 
+#ifndef MOUNT_GOTO_MAX_POLL_MS
+#define MOUNT_GOTO_MAX_POLL_MS 90000
+#endif
+
 // ── WiFi flags ────────────────────────────────────────────────────────────
 static const char* const WIFI_SSID     = secrets.getSSID();
 static const char* const WIFI_PASSWORD = secrets.getPassword();
