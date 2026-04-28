@@ -1,5 +1,6 @@
 #include "mount_link.h"
 
+#include <atomic>
 #include <math.h>
 #include <esp_task_wdt.h>
 #include <ModbusMaster.h>
@@ -32,8 +33,8 @@ QueueHandle_t mountCommandQueue = nullptr;
 SemaphoreHandle_t mountStateMutex = nullptr;
 MountLinkChangedCallback changedCallback = nullptr;
 volatile bool mountLinkPaused = false;
-volatile bool urgentStopRequested = false;
 volatile bool modbusWatchdogRegistered = false;
+std::atomic<bool> urgentStopRequested{false};
 bool gotoActive = false;
 bool followTargetActive = false;
 bool jogActive = false;
@@ -245,7 +246,7 @@ void applyMountCommand(const MountCommand& cmd) {
 
     switch (cmd.type) {
         case MountCommandType::STOP:
-            urgentStopRequested = false;
+            urgentStopRequested.store(false, std::memory_order_release);
             result = applyStopRequest() ? modbus.ku8MBSuccess : 0xFF;
             break;
 
@@ -392,8 +393,7 @@ void modbusTask(void* pvParams) {
                 }
                 vTaskDelay(pdMS_TO_TICKS(100));
 
-                if (urgentStopRequested) {
-                    urgentStopRequested = false;
+                if (urgentStopRequested.exchange(false, std::memory_order_acq_rel)) {
                     bool stopped = applyStopRequest();
                     if (DEBUG_LX200_MODBUS) {
                         Serial.printf("[Modbus] STOP prioritario durante GOTO: %s.\n",
@@ -545,9 +545,11 @@ bool mountLinkRequestStop() {
     if (!telescopeRef) return false;
 
     MountCommand cmd = {MountCommandType::STOP, 0, 0, 0, 0, 0};
-    if (!enqueuePriorityMountCommand(cmd)) return false;
-
-    urgentStopRequested = true;
+    urgentStopRequested.store(true, std::memory_order_release);
+    if (!enqueuePriorityMountCommand(cmd)) {
+        urgentStopRequested.store(false, std::memory_order_release);
+        return false;
+    }
     return true;
 }
 
